@@ -2,7 +2,11 @@ name: APK bauen
 
 on:
   push:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -24,9 +28,32 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug --stacktrace
+          cp app/build/outputs/apk/debug/app-debug.apk TattooTryOn.apk
 
-      - name: APK hochladen
+      - name: APK hochladen (Artifact)
         uses: actions/upload-artifact@v4
         with:
           name: TattooTryOn-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: TattooTryOn.apk
+
+      - name: APK als Release veröffentlichen (direkter Download am Handy)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete apk --yes --cleanup-tag || true
+          gh release create apk TattooTryOn.apk \
+            --title "TattooTryOn – aktuelle APK" \
+            --notes "Automatisch gebaut aus ${GITHUB_SHA::7}. Am Handy TattooTryOn.apk antippen und installieren." \
+            --target "$GITHUB_SHA"
+
+      - name: APK im Branch apk-build ablegen
+        run: |
+          mkdir -p /tmp/apk && cp TattooTryOn.apk /tmp/apk/
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan apk-build
+          git rm -rf --cached . -q
+          cp /tmp/apk/TattooTryOn.apk .
+          git add -f TattooTryOn.apk
+          git commit -q -m "APK aus ${GITHUB_SHA::7}"
+          git push -f origin apk-build
