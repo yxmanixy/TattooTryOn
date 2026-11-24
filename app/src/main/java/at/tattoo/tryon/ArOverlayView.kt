@@ -277,7 +277,8 @@ class ArOverlayView @JvmOverloads constructor(
 
     private fun drawSkeleton(canvas: Canvas) {
         val ids = neededLandmarks()
-        val pts = ids.mapNotNull { smoothed[it] }
+        val pts = ArrayList<PointF>()
+        for (id in ids) smoothed[id]?.let { pts.add(it) }
         if (anchor.torso && pts.size == 4) {
             canvas.drawLine(pts[0].x, pts[0].y, pts[1].x, pts[1].y, bonePaint)
             canvas.drawLine(pts[2].x, pts[2].y, pts[3].x, pts[3].y, bonePaint)
