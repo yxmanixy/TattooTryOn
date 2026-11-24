@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <item
+        android:id="@+id/action_undo"
+        android:title="Zurück"
+        app:showAsAction="always" />
+    <item
+        android:id="@+id/action_save"
+        android:title="Speichern"
+        app:showAsAction="always" />
+    <item
+        android:id="@+id/action_new"
+        android:title="Anderes Bild laden"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_reset"
+        android:title="Alles zurücksetzen"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_fit"
+        android:title="Ansicht einpassen"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_help"
+        android:title="Anleitung"
+        app:showAsAction="never" />
+</menu>
