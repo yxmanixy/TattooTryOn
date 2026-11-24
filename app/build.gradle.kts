@@ -11,8 +11,13 @@ android {
         applicationId = "at.tattoo.tryon"
         minSdk = 29
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "2.0"
+
+        ndk {
+            // Nur echte Smartphone-Prozessoren -> deutlich kleinere APK
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     buildTypes {
@@ -51,8 +56,7 @@ dependencies {
     implementation("androidx.camera:camera-camera2:$camerax")
     implementation("androidx.camera:camera-lifecycle:$camerax")
     implementation("androidx.camera:camera-view:$camerax")
-    implementation("androidx.camera:camera-mlkit-vision:$camerax")
 
-    // Körpererkennung (Pose Detection), Modell ist in der App enthalten -> funktioniert offline
-    implementation("com.google.mlkit:pose-detection:18.0.0-beta5")
+    // Bild-Tracking für die AR-Ansicht (Optical Flow, Homographie)
+    implementation("org.opencv:opencv:4.10.0")
 }

@@ -4,42 +4,48 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Matrix
 import android.os.Bundle
+import android.util.Size
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
-import androidx.camera.mlkit.vision.MlKitAnalyzer
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.view.CameraController
 import androidx.camera.view.LifecycleCameraController
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import com.google.android.material.button.MaterialButton
-import com.google.android.material.chip.Chip
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.slider.Slider
-import com.google.mlkit.vision.pose.PoseDetection
-import com.google.mlkit.vision.pose.PoseDetector
-import com.google.mlkit.vision.pose.defaults.PoseDetectorOptions
+import org.opencv.android.OpenCVLoader
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 /**
- * AR-Live-Ansicht: Kamerabild + Körpererkennung (ML Kit Pose Detection).
- * Das Tattoo wird an einem gewählten Körperteil verankert und bewegt sich mit.
+ * AR-Ansicht: Kamerabild + Tattoo.
+ * Das Tattoo ist sofort sichtbar. Antippen verankert es an der Hautstelle,
+ * danach folgt es dieser Stelle per Bild-Tracking (auch wenn sich die Kamera bewegt).
  */
-class ArActivity : AppCompatActivity() {
+class ArActivity : AppCompatActivity(), ArOverlayView.Listener, TattooTracker.Listener {
 
     private lateinit var previewView: PreviewView
     private lateinit var overlay: ArOverlayView
     private lateinit var status: TextView
-    private lateinit var btnAnchor: MaterialButton
+    private lateinit var btnFreeze: MaterialButton
 
     private var controller: LifecycleCameraController? = null
-    private var poseDetector: PoseDetector? = null
+    private var tracker: TattooTracker? = null
     private var useFront = false
+    private var tattooPath: String? = null
+    private var trackingAvailable = false
+    private var stable = false
+
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
+    private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
     private val cameraPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
@@ -57,31 +63,39 @@ class ArActivity : AppCompatActivity() {
         previewView = findViewById(R.id.previewView)
         overlay = findViewById(R.id.overlay)
         status = findViewById(R.id.status)
-        btnAnchor = findViewById(R.id.btnAnchor)
+        btnFreeze = findViewById(R.id.btnFreeze)
 
         previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
         previewView.scaleType = PreviewView.ScaleType.FILL_CENTER
+        overlay.listener = this
 
-        overlay.onTrackingChanged = { updateStatus(it) }
+        trackingAvailable = try {
+            OpenCVLoader.initLocal()
+        } catch (t: Throwable) {
+            false
+        }
+        if (!trackingAvailable) {
+            Toast.makeText(this, "Tracking nicht verfügbar – Tattoo kann nur manuell platziert werden.", Toast.LENGTH_LONG).show()
+        }
 
-        findViewById<MaterialButton>(R.id.btnBack).setOnClickListener { finish() }
-        btnAnchor.setOnClickListener { chooseAnchor() }
-        findViewById<Slider>(R.id.sliderOpacity).addOnChangeListener { _, value, _ -> overlay.opacity = value }
-        findViewById<MaterialButton>(R.id.btnSnapshot).setOnClickListener { snapshot() }
+        findViewById<MaterialButton>(R.id.btnClose).setOnClickListener { finish() }
+        findViewById<MaterialButton>(R.id.btnRelease).setOnClickListener { releaseTattoo() }
+        btnFreeze.setOnClickListener { if (overlay.frozenFrame == null) freeze() else unfreeze() }
+        findViewById<MaterialButton>(R.id.btnSave).setOnClickListener { saveJpg() }
         findViewById<MaterialButton>(R.id.btnSwitch).setOnClickListener { switchCamera() }
         findViewById<MaterialButton>(R.id.btnTattoo).setOnClickListener {
             TattooPicker.show(this) { loadTattoo(it.absolutePath) }
         }
-        findViewById<Chip>(R.id.chipSkeleton).setOnCheckedChangeListener { _, checked -> overlay.showSkeleton = checked }
-        findViewById<Chip>(R.id.chipReset).setOnClickListener { overlay.resetAdjustments() }
+        findViewById<Slider>(R.id.sliderOpacity).addOnChangeListener { _, value, _ -> overlay.opacity = value }
+        findViewById<Slider>(R.id.sliderCurve).addOnChangeListener { _, value, fromUser ->
+            if (fromUser) overlay.setCurvature(value)
+        }
 
-        val savedAnchor = savedInstanceState?.getString(STATE_ANCHOR)
-        val anchor = BodyAnchor.values().firstOrNull { it.name == savedAnchor } ?: BodyAnchor.LEFT_FOREARM
-        setAnchor(anchor)
         useFront = savedInstanceState?.getBoolean(STATE_FRONT) ?: false
-
         val path = savedInstanceState?.getString(STATE_TATTOO) ?: intent.getStringExtra(EXTRA_TATTOO)
         if (path != null) loadTattoo(path) else TattooPicker.show(this) { loadTattoo(it.absolutePath) }
+
+        updateStatus()
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -90,11 +104,8 @@ class ArActivity : AppCompatActivity() {
         }
     }
 
-    private var tattooPath: String? = null
-
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        outState.putString(STATE_ANCHOR, overlay.anchor.name)
         outState.putBoolean(STATE_FRONT, useFront)
         tattooPath?.let { outState.putString(STATE_TATTOO, it) }
     }
@@ -108,37 +119,32 @@ class ArActivity : AppCompatActivity() {
                     Toast.makeText(this, "Tattoo konnte nicht geladen werden", Toast.LENGTH_SHORT).show()
                 } else {
                     tattooPath = path
-                    overlay.tattoo = bmp
+                    overlay.setTattoo(bmp)
+                    tracker?.active = false
+                    updateStatus()
                 }
             }
         }
     }
 
     private fun startCamera() {
-        val options = PoseDetectorOptions.Builder()
-            .setDetectorMode(PoseDetectorOptions.STREAM_MODE)
-            .build()
-        val detector = PoseDetection.getClient(options)
-        poseDetector = detector
-
         val c = LifecycleCameraController(this)
         c.cameraSelector = if (useFront) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
-        val mainExecutor = ContextCompat.getMainExecutor(this)
-        c.setImageAnalysisAnalyzer(
-            mainExecutor,
-            MlKitAnalyzer(
-                listOf(detector),
-                CameraController.COORDINATE_SYSTEM_VIEW_REFERENCED,
-                mainExecutor
-            ) { result: MlKitAnalyzer.Result? ->
-                val pose = result?.getValue(detector)
-                overlay.updatePose(pose)
-            }
-        )
+        c.setEnabledUseCases(CameraController.IMAGE_ANALYSIS)
+        c.imageAnalysisResolutionSelector = ResolutionSelector.Builder()
+            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+            .setResolutionStrategy(
+                ResolutionStrategy(Size(960, 720), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER)
+            )
+            .build()
+        if (trackingAvailable) {
+            val t = TattooTracker(this)
+            tracker = t
+            c.setImageAnalysisAnalyzer(analysisExecutor, t)
+        }
         c.bindToLifecycle(this)
         previewView.controller = c
         controller = c
-        updateStatus(false)
     }
 
     private fun switchCamera() {
@@ -148,6 +154,7 @@ class ArActivity : AppCompatActivity() {
             if (c.hasCamera(target)) {
                 useFront = !useFront
                 c.cameraSelector = target
+                releaseTattoo()
             } else {
                 Toast.makeText(this, "Keine weitere Kamera gefunden", Toast.LENGTH_SHORT).show()
             }
@@ -156,70 +163,116 @@ class ArActivity : AppCompatActivity() {
         }
     }
 
-    private fun setAnchor(a: BodyAnchor) {
-        overlay.anchor = a
-        btnAnchor.text = "Körperteil: ${a.label}"
-        updateStatus(false)
+    private fun releaseTattoo() {
+        if (overlay.frozenFrame != null) unfreeze()
+        tracker?.active = false
+        overlay.release()
+        updateStatus()
     }
 
-    private fun chooseAnchor() {
-        val all = BodyAnchor.values()
-        val labels = all.map { it.label }.toTypedArray()
-        MaterialAlertDialogBuilder(this)
-            .setTitle("Wo soll das Tattoo sitzen?")
-            .setSingleChoiceItems(labels, all.indexOf(overlay.anchor)) { d, which ->
-                setAnchor(all[which])
-                d.dismiss()
-            }
-            .show()
-    }
+    // ---------- Standbild / Speichern ----------
 
-    private fun updateStatus(tracked: Boolean) {
-        val a = overlay.anchor
-        status.text = when {
-            !a.tracked -> "Freier Modus: Tattoo mit Fingern platzieren, skalieren und drehen."
-            tracked -> "✓ ${a.label} erkannt – 1 Finger verschiebt, 2 Finger drehen/skalieren."
-            a.torso -> "Suche Oberkörper … Schultern (und Hüfte) ins Bild bringen."
-            else -> "Suche ${a.label} … etwas Abstand halten, damit Schulter, Ellbogen bzw. Knie sichtbar sind."
-        }
-    }
-
-    /** Speichert das aktuelle Kamerabild mit Tattoo in der Galerie. */
-    private fun snapshot() {
+    private fun freeze(): Boolean {
         val frame: Bitmap? = previewView.bitmap
         if (frame == null) {
             Toast.makeText(this, "Kein Kamerabild verfügbar", Toast.LENGTH_SHORT).show()
-            return
+            return false
         }
-        val out = frame.copy(Bitmap.Config.ARGB_8888, true)
+        tracker?.active = false
+        overlay.freeze(frame)
+        btnFreeze.text = "▶ Live"
+        updateStatus()
+        return true
+    }
+
+    private fun unfreeze() {
+        overlay.unfreeze()
+        btnFreeze.text = "⏸ Standbild"
+        if (overlay.anchored) tracker?.active = true
+        updateStatus()
+    }
+
+    private fun saveJpg() {
+        if (overlay.frozenFrame == null && !freeze()) return
+        val frame = overlay.frozenFrame ?: return
+        val out = Bitmap.createBitmap(frame.width, frame.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
-        if (out.width != overlay.width && overlay.width > 0) {
-            val s = out.width.toFloat() / overlay.width
+        canvas.drawBitmap(frame, 0f, 0f, null)
+        if (overlay.width > 0 && frame.width != overlay.width) {
+            val s = frame.width.toFloat() / overlay.width
             canvas.scale(s, s)
         }
-        overlay.drawTattooOn(canvas, multiply = true)
+        overlay.drawTattoo(canvas, multiply = true)
         val appCtx = applicationContext
         worker.execute {
-            val uri = ImageUtils.saveToGallery(appCtx, out, "ar_tattoo", png = false)
+            val uri = ImageUtils.saveToGallery(appCtx, out, "tattoo_ar", png = false)
             runOnUiThread {
                 Toast.makeText(
                     this,
-                    if (uri != null) "Foto gespeichert in Bilder/TattooTryOn" else "Speichern fehlgeschlagen",
+                    if (uri != null) "JPG gespeichert in Bilder/TattooTryOn" else "Speichern fehlgeschlagen",
                     Toast.LENGTH_SHORT
                 ).show()
             }
         }
     }
 
+    // ---------- Status ----------
+
+    private fun updateStatus() {
+        status.text = when {
+            overlay.frozenFrame != null ->
+                "Standbild – Tattoo kann noch verschoben werden. „Als JPG speichern“ sichert das Bild."
+            !overlay.anchored ->
+                "Tippe auf die Stelle am Körper, an der das Tattoo sitzen soll. Zwei Finger: drehen/skalieren."
+            !trackingAvailable ->
+                "Platziert (ohne Tracking)."
+            stable ->
+                "✓ Verankert – das Tattoo folgt der Hautstelle."
+            else ->
+                "Verankert – suche Halt im Bild … Kamera ruhig halten."
+        }
+    }
+
+    // ---------- ArOverlayView.Listener ----------
+
+    override fun onAnchored() {
+        val t = tracker
+        if (t != null) {
+            t.active = true
+            t.restart()
+        }
+        stable = false
+        updateStatus()
+    }
+
+    override fun onQuadEdited() {
+        tracker?.requestReseed()
+    }
+
+    // ---------- TattooTracker.Listener (Analyse-Thread) ----------
+
+    override fun onMotion(motion: Matrix) {
+        runOnUiThread { overlay.applyMotion(motion) }
+    }
+
+    override fun onTrackingState(stable: Boolean) {
+        runOnUiThread {
+            this.stable = stable
+            updateStatus()
+        }
+    }
+
+    override fun currentQuad(): FloatArray? = overlay.quadForTracking()
+
     override fun onDestroy() {
         super.onDestroy()
+        tracker?.active = false
         controller?.clearImageAnalysisAnalyzer()
-        poseDetector?.close()
         worker.shutdown()
+        analysisExecutor.shutdown()
     }
 
     companion object {
-        private const val STATE_ANCHOR = "anchor"
         private const val STATE_FRONT = "front"
         private const val STATE_TATTOO = "tattoo"
     }

@@ -71,8 +71,13 @@ class ExtractActivity : AppCompatActivity(), ExtractView.Listener {
         }
         findViewById<ChipGroup>(R.id.modeGroup).setOnCheckedStateChangeListener { _, ids ->
             val ex = extractor ?: return@setOnCheckedStateChangeListener
-            ex.mode = if (ids.firstOrNull() == R.id.modeColor) Extractor.Mode.COLOR else Extractor.Mode.INK
+            ex.mode = when (ids.firstOrNull()) {
+                R.id.modeColor -> Extractor.Mode.COLOR
+                R.id.modeInk -> Extractor.Mode.INK
+                else -> Extractor.Mode.AUTO
+            }
             scheduleKey(0)
+            updateHint()
         }
         findViewById<Chip>(R.id.chipOriginal).setOnCheckedChangeListener { _, checked ->
             extractView.showOriginal = checked
@@ -138,14 +143,49 @@ class ExtractActivity : AppCompatActivity(), ExtractView.Listener {
                     if (extractor == null) finish()
                     return@post
                 }
-                ex.mode = if (findViewById<Chip>(R.id.modeColor).isChecked) Extractor.Mode.COLOR else Extractor.Mode.INK
                 ex.tolerance = sliderTol.value
                 ex.softness = sliderSoft.value
                 extractor = ex
                 extractView.setImages(ex.original, ex.result)
-                findViewById<Chip>(R.id.toolLasso).isChecked = true
+                findViewById<Chip>(R.id.toolErase).isChecked = true
                 updateHint()
                 invalidateOptionsMenu()
+                runAutoDetect()
+            }
+        }
+    }
+
+    /** Erkennt das Tattoo automatisch und stellt es frei. */
+    private fun runAutoDetect() {
+        val ex = extractor ?: return
+        setBusy(true)
+        hint.text = "Tattoo wird automatisch erkannt …"
+        worker.execute {
+            val auto = try {
+                ex.autoDetect()
+            } catch (e: Throwable) {
+                null
+            }
+            main.post {
+                setBusy(false)
+                if (isDestroyed || extractor !== ex) return@post
+                if (auto == null) {
+                    Toast.makeText(this, "Automatische Erkennung fehlgeschlagen – bitte manuell umranden.", Toast.LENGTH_LONG).show()
+                    findViewById<Chip>(R.id.toolLasso).isChecked = true
+                    updateHint()
+                    return@post
+                }
+                ex.applyAuto(auto)
+                findViewById<Chip>(R.id.modeAuto).isChecked = true
+                ex.mode = Extractor.Mode.AUTO
+                scheduleKey(0)
+                val msg = when {
+                    ex.hasTransparency -> "Bild ist bereits freigestellt."
+                    auto.found -> "Tattoo erkannt. Mit Toleranz, Radieren oder Umranden verfeinern."
+                    else -> "Kein eindeutiges Tattoo gefunden – bitte mit „Umranden“ markieren."
+                }
+                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                updateHint()
             }
         }
     }
@@ -181,7 +221,7 @@ class ExtractActivity : AppCompatActivity(), ExtractView.Listener {
         hint.text = when {
             ex == null -> "Bild wird geladen …"
             extractView.tool == ExtractView.Tool.LASSO ->
-                "Fahre mit dem Finger einmal rund um das Tattoo (auf der Haut). Zwei Finger = zoomen/verschieben."
+                "Umranden: Fahre einmal rund um das Tattoo, falls die automatische Erkennung danebenliegt. Zwei Finger = zoomen."
             extractView.tool == ExtractView.Tool.SAMPLE ->
                 "Tippe auf freie Haut neben dem Tattoo (auch mehrfach: hell, dunkel). Proben: ${ex.samples.size}"
             extractView.tool == ExtractView.Tool.ERASE ->
@@ -196,7 +236,7 @@ class ExtractActivity : AppCompatActivity(), ExtractView.Listener {
     override fun onLassoFinished(path: Path) {
         val ex = extractor ?: return
         ex.applyLasso(path)
-        if (ex.samples.isEmpty()) {
+        if (ex.mode != Extractor.Mode.AUTO && ex.samples.isEmpty()) {
             val skin = ex.sampleAlongPath(path)
             if (skin != null) {
                 ex.samples.add(skin)
@@ -215,6 +255,11 @@ class ExtractActivity : AppCompatActivity(), ExtractView.Listener {
     override fun onSampleTap(x: Float, y: Float) {
         val ex = extractor ?: return
         val c = ex.averageAt(x.toInt(), y.toInt()) ?: return
+        if (ex.mode == Extractor.Mode.AUTO) {
+            // Antippen nutzt die Hautproben -> in den Modus "Tinte" wechseln
+            findViewById<Chip>(R.id.modeInk).isChecked = true
+            ex.mode = Extractor.Mode.INK
+        }
         ex.addSample(c)
         scheduleKey(0)
         updateHint()
@@ -255,6 +300,9 @@ class ExtractActivity : AppCompatActivity(), ExtractView.Listener {
             R.id.action_save -> {
                 save(); return true
             }
+            R.id.action_auto -> {
+                runAutoDetect(); return true
+            }
             R.id.action_new -> {
                 launchPicker(); return true
             }
@@ -279,8 +327,9 @@ class ExtractActivity : AppCompatActivity(), ExtractView.Listener {
         MaterialAlertDialogBuilder(this)
             .setTitle("So stellst du ein Tattoo frei")
             .setMessage(
-                "1. Umranden: Fahre einmal rund um das Tattoo. Alles außerhalb wird entfernt, " +
-                    "die Hautfarbe an der Linie wird automatisch erkannt.\n\n" +
+                "Das Tattoo wird beim Öffnen automatisch erkannt und freigestellt (Modus Auto).\n\n" +
+                    "1. Umranden: Liegt die Erkennung daneben, fahre einmal rund um das Tattoo. " +
+                    "Alles außerhalb wird entfernt.\n\n" +
                     "2. Haut antippen: Tippe zusätzlich auf helle und schattige Hautstellen, " +
                     "damit die Haut sauber verschwindet.\n\n" +
                     "3. Toleranz erhöhen, bis die Haut weg ist, aber die Linien bleiben. " +

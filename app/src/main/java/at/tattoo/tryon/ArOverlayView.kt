@@ -4,363 +4,423 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BlendMode
 import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.DashPathEffect
+import android.graphics.Matrix
 import android.graphics.Paint
-import android.graphics.PointF
+import android.graphics.Path
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
-import com.google.mlkit.vision.pose.Pose
-import com.google.mlkit.vision.pose.PoseLandmark
+import android.view.ViewConfiguration
+import java.util.concurrent.Executors
+import kotlin.math.abs
+import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sin
 
-/** Körperstellen, an denen das Tattoo verankert werden kann. */
-enum class BodyAnchor(
-    val label: String,
-    val a: Int,
-    val b: Int,
-    val torso: Boolean,
-    val widthFactor: Float,
-    val torsoPosition: Float = 0f
-) {
-    LEFT_FOREARM("Linker Unterarm", PoseLandmark.LEFT_ELBOW, PoseLandmark.LEFT_WRIST, false, 0.42f),
-    RIGHT_FOREARM("Rechter Unterarm", PoseLandmark.RIGHT_ELBOW, PoseLandmark.RIGHT_WRIST, false, 0.42f),
-    LEFT_UPPER_ARM("Linker Oberarm", PoseLandmark.LEFT_SHOULDER, PoseLandmark.LEFT_ELBOW, false, 0.42f),
-    RIGHT_UPPER_ARM("Rechter Oberarm", PoseLandmark.RIGHT_SHOULDER, PoseLandmark.RIGHT_ELBOW, false, 0.42f),
-    LEFT_THIGH("Linker Oberschenkel", PoseLandmark.LEFT_HIP, PoseLandmark.LEFT_KNEE, false, 0.4f),
-    RIGHT_THIGH("Rechter Oberschenkel", PoseLandmark.RIGHT_HIP, PoseLandmark.RIGHT_KNEE, false, 0.4f),
-    LEFT_CALF("Linker Unterschenkel", PoseLandmark.LEFT_KNEE, PoseLandmark.LEFT_ANKLE, false, 0.36f),
-    RIGHT_CALF("Rechter Unterschenkel", PoseLandmark.RIGHT_KNEE, PoseLandmark.RIGHT_ANKLE, false, 0.36f),
-    CHEST("Brust / oberer Rücken", PoseLandmark.LEFT_SHOULDER, PoseLandmark.RIGHT_SHOULDER, true, 0.55f, 0.28f),
-    BELLY("Bauch / unterer Rücken", PoseLandmark.LEFT_SHOULDER, PoseLandmark.RIGHT_SHOULDER, true, 0.5f, 0.72f),
-    FREE("Frei platzieren (ohne Tracking)", -1, -1, false, 0f);
-
-    val tracked: Boolean get() = a >= 0
-}
-
 /**
- * Zeichnet das Tattoo über das Kamerabild und verankert es an den erkannten Körperpunkten.
- * Gesten: 1 Finger = verschieben, 2 Finger = skalieren/drehen (relativ zum Körperteil).
+ * Zeichnet das Tattoo als perspektivisch verzerrbares Viereck über das Kamerabild.
+ * - schwebt nach dem Öffnen in der Mitte
+ * - Antippen = an dieser Stelle verankern (danach bewegt es der Tracker mit)
+ * - 1 Finger = verschieben, 2 Finger = skalieren/drehen
+ * - Standbild: eingefrorenes Kamerabild + Tattoo mit Hauteffekt
  */
 class ArOverlayView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
 ) : View(context, attrs) {
 
-    var tattoo: Bitmap? = null
+    interface Listener {
+        fun onAnchored()
+        fun onQuadEdited()
+    }
+
+    var listener: Listener? = null
+
+    private var tattoo: Bitmap? = null
+    private var warped: Bitmap? = null
+
+    /** Ecken TL, TR, BR, BL in View-Koordinaten. */
+    private val quad = FloatArray(8)
+    private var quadValid = false
+
+    @Volatile
+    private var quadSnapshot: FloatArray? = null
+
+    var anchored = false
+        private set
+
+    var frozenFrame: Bitmap? = null
+        private set
+
+    var opacity = 0.9f
         set(value) {
             field = value
             invalidate()
         }
-    var anchor: BodyAnchor = BodyAnchor.LEFT_FOREARM
-        set(value) {
-            field = value
-            resetAdjustments()
-            smoothed.clear()
-            lastSeen = 0L
-            invalidate()
-        }
-    var opacity = 0.85f
-        set(value) {
-            field = value
-            invalidate()
-        }
-    var showSkeleton = false
-        set(value) {
-            field = value
-            invalidate()
-        }
-    /** Wird aufgerufen, wenn sich der Tracking-Status ändert (true = Körperteil erkannt). */
-    var onTrackingChanged: ((Boolean) -> Unit)? = null
 
-    // Benutzer-Anpassungen relativ zum Körperteil
-    private var userScale = 1f
-    private var userRot = 0f
-    private var offX = 0f
-    private var offY = 0f
-
-    // Freier Modus (Bildschirmkoordinaten)
-    private var freeX = -1f
-    private var freeY = -1f
-    private var freeWidth = -1f
-
-    private val smoothed = HashMap<Int, PointF>()
-    private var lastSeen = 0L
-    private var lastTracked = false
-
-    // Zuletzt berechnete Platzierung
-    private var placed = false
-    private var pCx = 0f
-    private var pCy = 0f
-    private var pBaseAngle = 0f // Grad, ohne Benutzerdrehung
-    private var pRef = 1f
+    var curvature = 0.45f
+        private set
 
     private val density = resources.displayMetrics.density
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+    private val main = Handler(Looper.getMainLooper())
+    private val warpExecutor = Executors.newSingleThreadExecutor()
+    private var warpVersion = 0
+
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
-    private val bonePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xCC4FC3F7.toInt()
-        strokeWidth = 3f * density
+    private val framePaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val drawMatrix = Matrix()
+    private val outlinePath = Path()
+    private val outlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
+        strokeWidth = 2f * density
+        color = Color.WHITE
+        pathEffect = DashPathEffect(floatArrayOf(10f * density, 8f * density), 0f)
     }
-    private val jointPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xFFFFFFFF.toInt()
-        style = Paint.Style.FILL
+    private val outlineShadow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 4f * density
+        color = 0x66000000
     }
 
-    fun resetAdjustments() {
-        userScale = 1f
-        userRot = 0f
-        offX = 0f
-        offY = 0f
-        freeX = -1f
-        freeY = -1f
-        freeWidth = -1f
+    // ---------- Tattoo / Wölbung ----------
+
+    fun setTattoo(bmp: Bitmap) {
+        // Für die Live-Ansicht reicht eine moderate Auflösung
+        val maxSide = 1200
+        val longest = max(bmp.width, bmp.height)
+        tattoo = if (longest > maxSide) {
+            val s = maxSide.toFloat() / longest
+            Bitmap.createScaledBitmap(bmp, (bmp.width * s).toInt().coerceAtLeast(1), (bmp.height * s).toInt().coerceAtLeast(1), true)
+        } else {
+            bmp
+        }
+        warped = null
+        quadValid = false
+        anchored = false
+        rebuildWarp()
         invalidate()
     }
 
-    private fun neededLandmarks(): IntArray = if (anchor.torso) {
-        intArrayOf(
-            PoseLandmark.LEFT_SHOULDER, PoseLandmark.RIGHT_SHOULDER,
-            PoseLandmark.LEFT_HIP, PoseLandmark.RIGHT_HIP
+    fun setCurvature(c: Float) {
+        curvature = c
+        rebuildWarp()
+    }
+
+    private fun rebuildWarp() {
+        val t = tattoo ?: return
+        val c = curvature
+        val version = ++warpVersion
+        warpExecutor.execute {
+            val w = try {
+                warpCylinder(t, c)
+            } catch (e: Throwable) {
+                t
+            }
+            main.post {
+                if (version == warpVersion) {
+                    warped = w
+                    invalidate()
+                }
+            }
+        }
+    }
+
+    // ---------- Viereck ----------
+
+    private fun ensureQuad() {
+        if (quadValid || width == 0 || height == 0) return
+        val t = tattoo ?: return
+        resetQuad(width / 2f, height / 2f, t)
+    }
+
+    private fun resetQuad(cx: Float, cy: Float, t: Bitmap) {
+        val qw = width * 0.45f
+        val qh = qw * t.height / t.width
+        quad[0] = cx - qw / 2; quad[1] = cy - qh / 2
+        quad[2] = cx + qw / 2; quad[3] = cy - qh / 2
+        quad[4] = cx + qw / 2; quad[5] = cy + qh / 2
+        quad[6] = cx - qw / 2; quad[7] = cy + qh / 2
+        quadValid = true
+        publish()
+    }
+
+    private fun publish() {
+        quadSnapshot = quad.copyOf()
+    }
+
+    /** Für den Tracker (Analyse-Thread). */
+    fun quadForTracking(): FloatArray? = quadSnapshot
+
+    private fun center(): FloatArray {
+        var x = 0f
+        var y = 0f
+        for (i in 0 until 4) {
+            x += quad[i * 2]; y += quad[i * 2 + 1]
+        }
+        return floatArrayOf(x / 4f, y / 4f)
+    }
+
+    /** Wendet die vom Tracker gemessene Bewegung an (UI-Thread). */
+    fun applyMotion(m: Matrix) {
+        if (!anchored || frozenFrame != null || !quadValid) return
+        val next = quad.copyOf()
+        m.mapPoints(next)
+        // Plausibilitätsprüfung: Fläche und Lage
+        val oldArea = area(quad)
+        val newArea = area(next)
+        if (newArea < oldArea * 0.5f || newArea > oldArea * 2f || !convex(next)) return
+        var cx = 0f
+        var cy = 0f
+        for (i in 0 until 4) {
+            cx += next[i * 2]; cy += next[i * 2 + 1]
+        }
+        cx /= 4f; cy /= 4f
+        if (cx < -width || cx > 2f * width || cy < -height || cy > 2f * height) return
+        System.arraycopy(next, 0, quad, 0, 8)
+        publish()
+        invalidate()
+    }
+
+    /** Löst das Tattoo und setzt es zurück in die Bildmitte. */
+    fun release() {
+        anchored = false
+        val t = tattoo
+        if (t != null && width > 0) resetQuad(width / 2f, height / 2f, t) else quadValid = false
+        invalidate()
+    }
+
+    fun freeze(frame: Bitmap) {
+        frozenFrame = frame
+        invalidate()
+    }
+
+    fun unfreeze() {
+        frozenFrame = null
+        invalidate()
+    }
+
+    // ---------- Zeichnen ----------
+
+    /** Zeichnet das Tattoo auf einen Canvas (auch für das Speichern). */
+    fun drawTattoo(canvas: Canvas, multiply: Boolean) {
+        val bmp = warped ?: tattoo ?: return
+        ensureQuad()
+        if (!quadValid) return
+        val src = floatArrayOf(
+            0f, 0f,
+            bmp.width.toFloat(), 0f,
+            bmp.width.toFloat(), bmp.height.toFloat(),
+            0f, bmp.height.toFloat()
         )
-    } else if (anchor.tracked) {
-        intArrayOf(anchor.a, anchor.b)
-    } else {
-        IntArray(0)
-    }
-
-    /** Neue Körperpose (Koordinaten bereits in View-Koordinaten dank MlKitAnalyzer). */
-    fun updatePose(pose: Pose?) {
-        if (!anchor.tracked) return
-        val now = SystemClock.uptimeMillis()
-        val required = if (anchor.torso) intArrayOf(PoseLandmark.LEFT_SHOULDER, PoseLandmark.RIGHT_SHOULDER)
-        else intArrayOf(anchor.a, anchor.b)
-
-        var ok = pose != null
-        if (pose != null) {
-            for (t in required) {
-                val lm = pose.getPoseLandmark(t)
-                if (lm == null || lm.inFrameLikelihood < 0.5f) {
-                    ok = false
-                    break
-                }
-            }
-        }
-        if (ok && pose != null) {
-            for (t in neededLandmarks()) {
-                val lm = pose.getPoseLandmark(t) ?: continue
-                if (lm.inFrameLikelihood < 0.5f) {
-                    smoothed.remove(t)
-                    continue
-                }
-                val p = lm.position
-                val old = smoothed[t]
-                if (old == null) {
-                    smoothed[t] = PointF(p.x, p.y)
-                } else {
-                    val jump = hypot(p.x - old.x, p.y - old.y)
-                    val k = if (jump > 80f * density) 1f else 0.55f
-                    old.x += (p.x - old.x) * k
-                    old.y += (p.y - old.y) * k
-                }
-            }
-            lastSeen = now
-        }
-        val trackedNow = now - lastSeen < 700L && lastSeen != 0L
-        if (trackedNow != lastTracked) {
-            lastTracked = trackedNow
-            onTrackingChanged?.invoke(trackedNow)
-        }
-        invalidate()
-    }
-
-    /** Berechnet Mittelpunkt, Basiswinkel und Referenzlänge aus den Landmarken. */
-    private fun computePlacement(): Boolean {
-        if (!anchor.tracked) {
-            if (freeX < 0f) {
-                freeX = width / 2f
-                freeY = height / 2f
-                freeWidth = width * 0.45f
-            }
-            pCx = freeX
-            pCy = freeY
-            pBaseAngle = 0f
-            pRef = freeWidth
-            return true
-        }
-        if (!lastTracked) return false
-
-        if (anchor.torso) {
-            val ls = smoothed[PoseLandmark.LEFT_SHOULDER] ?: return false
-            val rs = smoothed[PoseLandmark.RIGHT_SHOULDER] ?: return false
-            val lh = smoothed[PoseLandmark.LEFT_HIP]
-            val rh = smoothed[PoseLandmark.RIGHT_HIP]
-            val smx = (ls.x + rs.x) / 2f
-            val smy = (ls.y + rs.y) / 2f
-            val vx = ls.x - rs.x
-            val vy = ls.y - rs.y
-            val shoulderW = hypot(vx, vy)
-            if (shoulderW < 4f) return false
-            var angle = Math.toDegrees(atan2(vy.toDouble(), vx.toDouble())).toFloat()
-            // Richtung "Kopf" bestimmen, damit das Tattoo nicht auf dem Kopf steht
-            val headX: Float
-            val headY: Float
-            if (lh != null && rh != null) {
-                headX = smx - (lh.x + rh.x) / 2f
-                headY = smy - (lh.y + rh.y) / 2f
-            } else {
-                headX = 0f
-                headY = -1f
-            }
-            val rad = Math.toRadians(angle.toDouble())
-            val upX = sin(rad).toFloat()
-            val upY = -cos(rad).toFloat()
-            if (upX * headX + upY * headY < 0f) angle += 180f
-
-            val torsoLen = if (lh != null && rh != null) hypot(headX, headY) else shoulderW * 1.3f
-            val r2 = Math.toRadians(angle.toDouble())
-            // "nach unten" im Tattoo-System = (-sin, cos)
-            val downX = -sin(r2).toFloat()
-            val downY = cos(r2).toFloat()
-            pCx = smx + downX * torsoLen * anchor.torsoPosition
-            pCy = smy + downY * torsoLen * anchor.torsoPosition
-            pBaseAngle = angle
-            pRef = shoulderW
-            return true
-        }
-
-        val pa = smoothed[anchor.a] ?: return false
-        val pb = smoothed[anchor.b] ?: return false
-        val dx = pb.x - pa.x
-        val dy = pb.y - pa.y
-        val len = hypot(dx, dy)
-        if (len < 4f) return false
-        // Tattoo-y-Achse zeigt entlang des Glieds (Ellbogen -> Handgelenk)
-        pBaseAngle = Math.toDegrees(atan2(-dx.toDouble(), dy.toDouble())).toFloat()
-        pCx = (pa.x + pb.x) / 2f
-        pCy = (pa.y + pb.y) / 2f
-        pRef = len
-        return true
-    }
-
-    /** Zeichnet das Tattoo auf einen beliebigen Canvas (auch für Schnappschüsse). */
-    fun drawTattooOn(canvas: Canvas, multiply: Boolean): Boolean {
-        val t = tattoo ?: return false
-        if (!computePlacement()) return false
-        val rad = Math.toRadians(pBaseAngle.toDouble())
-        val c = cos(rad).toFloat()
-        val s = sin(rad).toFloat()
-        val ox = (offX * c - offY * s) * pRef
-        val oy = (offX * s + offY * c) * pRef
-        val widthPx = if (anchor.tracked) pRef * anchor.widthFactor * userScale else pRef * userScale
-        val scale = widthPx / t.width
+        if (!drawMatrix.setPolyToPoly(src, 0, quad, 0, 4)) return
         paint.alpha = (opacity * 255).toInt().coerceIn(0, 255)
         paint.blendMode = if (multiply) BlendMode.MULTIPLY else null
-        canvas.save()
-        canvas.translate(pCx + ox, pCy + oy)
-        canvas.rotate(pBaseAngle + userRot)
-        canvas.scale(scale, scale)
-        canvas.drawBitmap(t, -t.width / 2f, -t.height / 2f, paint)
-        canvas.restore()
-        placed = true
-        return true
+        canvas.drawBitmap(bmp, drawMatrix, paint)
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        if (showSkeleton && lastTracked) drawSkeleton(canvas)
-        placed = false
-        drawTattooOn(canvas, multiply = false)
-    }
-
-    private fun drawSkeleton(canvas: Canvas) {
-        val ids = neededLandmarks()
-        val pts = ArrayList<PointF>()
-        for (id in ids) smoothed[id]?.let { pts.add(it) }
-        if (anchor.torso && pts.size == 4) {
-            canvas.drawLine(pts[0].x, pts[0].y, pts[1].x, pts[1].y, bonePaint)
-            canvas.drawLine(pts[2].x, pts[2].y, pts[3].x, pts[3].y, bonePaint)
-            canvas.drawLine(pts[0].x, pts[0].y, pts[2].x, pts[2].y, bonePaint)
-            canvas.drawLine(pts[1].x, pts[1].y, pts[3].x, pts[3].y, bonePaint)
-        } else if (pts.size >= 2) {
-            canvas.drawLine(pts[0].x, pts[0].y, pts[1].x, pts[1].y, bonePaint)
+        val frame = frozenFrame
+        if (frame != null) {
+            canvas.drawBitmap(frame, null, android.graphics.Rect(0, 0, width, height), framePaint)
+            drawTattoo(canvas, multiply = true)
+        } else {
+            drawTattoo(canvas, multiply = false)
         }
-        for (p in pts) canvas.drawCircle(p.x, p.y, 6f * density, jointPaint)
+        if (!anchored && quadValid && frame == null) {
+            outlinePath.reset()
+            outlinePath.moveTo(quad[0], quad[1])
+            outlinePath.lineTo(quad[2], quad[3])
+            outlinePath.lineTo(quad[4], quad[5])
+            outlinePath.lineTo(quad[6], quad[7])
+            outlinePath.close()
+            canvas.drawPath(outlinePath, outlineShadow)
+            canvas.drawPath(outlinePath, outlinePaint)
+        }
     }
 
     // ---------- Gesten ----------
 
-    private var dragging = false
-    private var multi = false
+    private var downX = 0f
+    private var downY = 0f
+    private var downTime = 0L
     private var lastX = 0f
     private var lastY = 0f
+    private var moved = false
+    private var multi = false
+    private var hadMulti = false
     private var lastDist = 0f
     private var lastAngle = 0f
+    private var lastMidX = 0f
+    private var lastMidY = 0f
+    private var edited = false
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
         if (tattoo == null) return false
+        ensureQuad()
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                downX = e.x; downY = e.y
                 lastX = e.x; lastY = e.y
-                dragging = true
+                downTime = SystemClock.uptimeMillis()
+                moved = false
                 multi = false
+                hadMulti = false
+                edited = false
             }
             MotionEvent.ACTION_POINTER_DOWN -> if (e.pointerCount == 2) {
-                lastDist = twoDist(e)
-                lastAngle = twoAngle(e)
                 multi = true
-                dragging = false
+                hadMulti = true
+                lastDist = hypot(e.getX(1) - e.getX(0), e.getY(1) - e.getY(0))
+                lastAngle = angle(e)
+                lastMidX = (e.getX(0) + e.getX(1)) / 2f
+                lastMidY = (e.getY(0) + e.getY(1)) / 2f
             }
             MotionEvent.ACTION_MOVE -> {
                 if (multi && e.pointerCount >= 2) {
-                    val d = twoDist(e)
-                    val a = twoAngle(e)
+                    val d = hypot(e.getX(1) - e.getX(0), e.getY(1) - e.getY(0))
+                    val a = angle(e)
+                    val mx = (e.getX(0) + e.getX(1)) / 2f
+                    val my = (e.getY(0) + e.getY(1)) / 2f
+                    val m = Matrix()
                     if (lastDist > 0f && d > 0f) {
-                        val f = d / lastDist
-                        if (anchor.tracked) userScale = (userScale * f).coerceIn(0.1f, 10f)
-                        else freeWidth = (freeWidth * f).coerceIn(20f, width * 4f)
+                        val s = d / lastDist
+                        m.postScale(s, s, lastMidX, lastMidY)
                     }
-                    userRot += a - lastAngle
-                    lastDist = d
-                    lastAngle = a
-                    invalidate()
-                } else if (dragging) {
-                    val dx = e.x - lastX
-                    val dy = e.y - lastY
-                    if (anchor.tracked) {
-                        if (pRef > 1f) {
-                            // Bildschirmbewegung in das lokale System des Körperteils drehen
-                            val rad = Math.toRadians(pBaseAngle.toDouble())
-                            val c = cos(rad).toFloat()
-                            val s = sin(rad).toFloat()
-                            offX += (dx * c + dy * s) / pRef
-                            offY += (-dx * s + dy * c) / pRef
-                        }
-                    } else {
-                        freeX += dx
-                        freeY += dy
+                    m.postRotate(a - lastAngle, lastMidX, lastMidY)
+                    m.postTranslate(mx - lastMidX, my - lastMidY)
+                    transformQuad(m)
+                    lastDist = d; lastAngle = a; lastMidX = mx; lastMidY = my
+                } else if (!multi) {
+                    if (!moved && hypot(e.x - downX, e.y - downY) > touchSlop) moved = true
+                    if (moved) {
+                        val m = Matrix()
+                        m.setTranslate(e.x - lastX, e.y - lastY)
+                        transformQuad(m)
                     }
                     lastX = e.x; lastY = e.y
-                    invalidate()
                 }
             }
             MotionEvent.ACTION_POINTER_UP -> if (e.pointerCount - 1 < 2) {
                 multi = false
                 val remaining = if (e.actionIndex == 0) 1 else 0
                 lastX = e.getX(remaining); lastY = e.getY(remaining)
-                dragging = true
+                moved = true
             }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                dragging = false
+            MotionEvent.ACTION_UP -> {
+                val isTap = !moved && !hadMulti && SystemClock.uptimeMillis() - downTime < 400
+                if (isTap && frozenFrame == null) {
+                    // Tattoo an die angetippte Stelle setzen und verankern
+                    val c = center()
+                    val m = Matrix()
+                    m.setTranslate(e.x - c[0], e.y - c[1])
+                    m.mapPoints(quad)
+                    publish()
+                    anchored = true
+                    invalidate()
+                    listener?.onAnchored()
+                } else if (edited && anchored) {
+                    listener?.onQuadEdited()
+                }
                 multi = false
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                multi = false
+                if (edited && anchored) listener?.onQuadEdited()
             }
         }
         return true
     }
 
-    private fun twoDist(e: MotionEvent) = hypot(e.getX(1) - e.getX(0), e.getY(1) - e.getY(0))
-    private fun twoAngle(e: MotionEvent) =
+    private fun transformQuad(m: Matrix) {
+        m.mapPoints(quad)
+        publish()
+        edited = true
+        invalidate()
+    }
+
+    private fun angle(e: MotionEvent): Float =
         Math.toDegrees(atan2((e.getY(1) - e.getY(0)).toDouble(), (e.getX(1) - e.getX(0)).toDouble())).toFloat()
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        warpExecutor.shutdown()
+    }
+
+    companion object {
+        private fun area(q: FloatArray): Float {
+            var a = 0f
+            for (i in 0 until 4) {
+                val j = (i + 1) % 4
+                a += q[i * 2] * q[j * 2 + 1] - q[j * 2] * q[i * 2 + 1]
+            }
+            return abs(a) / 2f
+        }
+
+        private fun convex(q: FloatArray): Boolean {
+            var sign = 0
+            for (i in 0 until 4) {
+                val ax = q[((i + 1) % 4) * 2] - q[i * 2]
+                val ay = q[((i + 1) % 4) * 2 + 1] - q[i * 2 + 1]
+                val bx = q[((i + 2) % 4) * 2] - q[((i + 1) % 4) * 2]
+                val by = q[((i + 2) % 4) * 2 + 1] - q[((i + 1) % 4) * 2 + 1]
+                val cross = ax * by - ay * bx
+                val s = if (cross > 0) 1 else if (cross < 0) -1 else 0
+                if (s != 0) {
+                    if (sign == 0) sign = s else if (s != sign) return false
+                }
+            }
+            return true
+        }
+
+        /**
+         * Legt das Tattoo um einen Zylinder (Arm/Bein): zur Seite hin gestaucht und ausgeblendet.
+         * curvature 0 = flach, 1 = stark gewölbt.
+         */
+        fun warpCylinder(src: Bitmap, curvature: Float): Bitmap {
+            if (curvature < 0.02f) return src
+            val w = src.width
+            val h = src.height
+            val inPx = IntArray(w * h)
+            src.getPixels(inPx, 0, w, 0, 0, w, h)
+            val outPx = IntArray(w * h)
+            val phiMax = curvature * 1.35f
+            val sinMax = sin(phiMax)
+            for (xo in 0 until w) {
+                val u = (xo + 0.5f) / w * 2f - 1f
+                val phi = asin((u * sinMax).coerceIn(-1f, 1f))
+                val us = phi / phiMax
+                val xs = ((us + 1f) / 2f * w - 0.5f).coerceIn(0f, (w - 1).toFloat())
+                val x0 = floor(xs).toInt()
+                val x1 = min(w - 1, x0 + 1)
+                val f = xs - x0
+                // Zum Rand hin blasser (Haut dreht sich vom Betrachter weg)
+                val shade = (1f - curvature) + curvature * (0.35f + 0.65f * cos(phi))
+                for (y in 0 until h) {
+                    val c0 = inPx[y * w + x0]
+                    val c1 = inPx[y * w + x1]
+                    val a0 = (c0 ushr 24) * (1f - f)
+                    val a1 = (c1 ushr 24) * f
+                    val a = a0 + a1
+                    if (a < 0.5f) continue
+                    val r = (((c0 shr 16) and 0xFF) * a0 + ((c1 shr 16) and 0xFF) * a1) / a
+                    val g = (((c0 shr 8) and 0xFF) * a0 + ((c1 shr 8) and 0xFF) * a1) / a
+                    val b = ((c0 and 0xFF) * a0 + (c1 and 0xFF) * a1) / a
+                    val alpha = (a * shade).toInt().coerceIn(0, 255)
+                    outPx[y * w + xo] = (alpha shl 24) or (r.toInt() shl 16) or (g.toInt() shl 8) or b.toInt()
+                }
+            }
+            return Bitmap.createBitmap(outPx, w, h, Bitmap.Config.ARGB_8888)
+        }
+    }
 }

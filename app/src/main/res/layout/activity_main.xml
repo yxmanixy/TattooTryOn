@@ -26,28 +26,37 @@
             android:textSize="14sp" />
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnExtract"
+            android:id="@+id/btnImport"
             android:layout_width="match_parent"
             android:layout_height="64dp"
-            android:text="1 · Tattoo freistellen"
+            android:text="＋ Tattoos hinzufügen (automatisch)"
             android:textSize="16sp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnExtract"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_marginTop="8dp"
+            android:text="Tattoo freistellen und bearbeiten"
+            android:textSize="15sp" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnTryOn"
             style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="match_parent"
-            android:layout_height="64dp"
+            android:layout_height="56dp"
             android:layout_marginTop="8dp"
-            android:text="2 · Auf Körperfoto anprobieren"
+            android:text="Auf Körperfoto anprobieren"
             android:textSize="16sp" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnAr"
             style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="match_parent"
-            android:layout_height="64dp"
+            android:layout_height="56dp"
             android:layout_marginTop="8dp"
-            android:text="3 · AR-Live-Ansicht (Kamera)"
+            android:text="AR-Live-Ansicht (Kamera)"
             android:textSize="16sp" />
 
         <TextView
@@ -77,7 +86,7 @@
                 android:layout_gravity="center"
                 android:gravity="center"
                 android:padding="24dp"
-                android:text="Noch keine Tattoos gespeichert.\nTipp: In Pinterest Bild speichern oder teilen → „Tattoo freistellen“."
+                android:text="Noch keine Tattoos gespeichert.\nTippe auf „Tattoos hinzufügen“ und wähle ein oder mehrere Fotos – die Tattoos werden automatisch erkannt und freigestellt."
                 android:textColor="#80FFFFFF" />
         </FrameLayout>
     </LinearLayout>

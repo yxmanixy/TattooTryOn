@@ -4,22 +4,17 @@
     android:layout_height="match_parent"
     android:background="@android:color/black">
 
-    <FrameLayout
-        android:id="@+id/cameraArea"
+    <androidx.camera.view.PreviewView
+        android:id="@+id/previewView"
         android:layout_width="match_parent"
-        android:layout_height="match_parent">
+        android:layout_height="match_parent" />
 
-        <androidx.camera.view.PreviewView
-            android:id="@+id/previewView"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent" />
+    <at.tattoo.tryon.ArOverlayView
+        android:id="@+id/overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
 
-        <at.tattoo.tryon.ArOverlayView
-            android:id="@+id/overlay"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent" />
-    </FrameLayout>
-
+    <!-- Obere Leiste -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -27,14 +22,15 @@
         android:background="#99000000"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:padding="8dp">
+        android:padding="6dp">
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnBack"
+            android:id="@+id/btnClose"
             style="@style/Widget.Material3.Button.TextButton"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Zurück" />
+            android:text="✕"
+            android:textSize="18sp" />
 
         <TextView
             android:id="@+id/status"
@@ -45,8 +41,16 @@
             android:paddingEnd="4dp"
             android:textColor="#FFFFFF"
             android:textSize="13sp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnRelease"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="↺ Lösen" />
     </LinearLayout>
 
+    <!-- Untere Leiste -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -57,13 +61,6 @@
         android:paddingTop="6dp"
         android:paddingEnd="12dp"
         android:paddingBottom="10dp">
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnAnchor"
-            style="@style/Widget.Material3.Button.OutlinedButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Körperteil: Linker Unterarm" />
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -81,59 +78,77 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:value="0.85"
+                android:value="0.9"
                 android:valueFrom="0.1"
                 android:valueTo="1.0" />
         </LinearLayout>
 
-        <HorizontalScrollView
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:scrollbars="none">
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
-            <LinearLayout
-                android:layout_width="wrap_content"
+            <TextView
+                style="@style/SectionLabel"
+                android:layout_width="80dp"
+                android:text="Wölbung" />
+
+            <com.google.android.material.slider.Slider
+                android:id="@+id/sliderCurve"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal">
+                android:layout_weight="1"
+                android:value="0.45"
+                android:valueFrom="0.0"
+                android:valueTo="1.0" />
+        </LinearLayout>
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnSnapshot"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Foto" />
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnSwitch"
-                    style="@style/Widget.Material3.Button.TonalButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:text="Kamera wechseln" />
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnFreeze"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="4dp"
+                android:layout_weight="1"
+                android:text="⏸ Standbild" />
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnTattoo"
-                    style="@style/Widget.Material3.Button.TonalButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:text="Tattoo" />
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnSave"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:layout_weight="1"
+                android:text="Als JPG speichern" />
+        </LinearLayout>
 
-                <com.google.android.material.chip.Chip
-                    android:id="@+id/chipSkeleton"
-                    style="@style/Widget.Material3.Chip.Filter"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:text="Punkte zeigen" />
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
 
-                <com.google.android.material.chip.Chip
-                    android:id="@+id/chipReset"
-                    style="@style/Widget.Material3.Chip.Assist"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:text="Position zurücksetzen" />
-            </LinearLayout>
-        </HorizontalScrollView>
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnTattoo"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="4dp"
+                android:layout_weight="1"
+                android:text="Tattoo wählen" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnSwitch"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:layout_weight="1"
+                android:text="Kamera wechseln" />
+        </LinearLayout>
     </LinearLayout>
 </FrameLayout>
