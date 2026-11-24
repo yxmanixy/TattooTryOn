@@ -4,29 +4,27 @@ Mit der App kannst du ein Tattoo aus einem Foto freistellen (z. B. aus einem Pin
 
 ## Funktionen
 
-**1 · Tattoo freistellen**
-- Bild aus der Galerie wählen oder in Pinterest/Galerie auf *Teilen → Tattoo freistellen* tippen.
-- **Umranden:** Fahre einmal mit dem Finger um das Tattoo. Alles außerhalb wird entfernt, und die Hautfarbe an der Linie wird automatisch erkannt.
-- **Haut antippen:** Weitere Hautstellen antippen (hell und schattig), damit die Haut verschwindet.
-- **Toleranz / Weichheit:** Damit stellst du ein, wie viel Haut entfernt wird und wie weich die Kanten werden.
-- **Modus Tinte** eignet sich für Black- & Grey-Arbeiten, **Modus Farbe** für bunte Tattoos oder Motive auf weißem Papier.
-- **Radieren / Zurückholen:** Pinsel zum Nacharbeiten. Mit zwei Fingern kannst du zoomen und verschieben.
-- **Speichern:** Das Tattoo wird als transparentes PNG in „Meine Tattoos“ abgelegt und lässt sich auch in die Galerie exportieren.
+**Tattoos hinzufügen (automatisch)**
+- Ein oder mehrere Fotos wählen. Die App erkennt das Tattoo in jedem Bild, stellt es frei und legt es unter „Meine Tattoos“ ab.
+- Die Erkennung schätzt die Hautfarbe lokal (auch bei Schatten) und markiert alles, was deutlich dunkler oder farbiger ist. Daraus wählt sie den größten, möglichst mittigen Bereich.
+- Bereits freigestellte PNGs werden unverändert übernommen.
 
-**2 · Foto-Anprobe**
-- Körperfoto mit der Kamera aufnehmen oder aus der Galerie wählen.
-- Tattoo mit einem Finger verschieben, mit zwei Fingern skalieren und drehen.
-- Deckkraft, Spiegeln sowie **Hauteffekt** (Multiplizieren-Modus: Hautstruktur und Licht scheinen durch).
-- Das fertige Bild wird unter *Bilder/TattooTryOn* gespeichert.
+**Freistellen & Bearbeiten**
+- Die automatische Erkennung läuft beim Öffnen sofort. Danach kannst du mit Toleranz/Weichheit, Radieren, Zurückholen oder Umranden nacharbeiten.
+- Modi: **Auto** (lokale Hautschätzung), **Tinte** und **Farbe** (beide über angetippte Hautproben).
+- Gespeicherte Tattoos lassen sich über „Meine Tattoos → Nachbearbeiten“ erneut öffnen.
 
-**3 · AR-Live-Ansicht**
-- Kamerabild mit Körpererkennung (Google ML Kit Pose Detection, läuft komplett offline auf dem Gerät).
-- Du wählst das Körperteil: Unter-/Oberarm, Ober-/Unterschenkel, Brust/oberer Rücken oder Bauch/unterer Rücken, jeweils links/rechts. Das Tattoo bewegt sich mit, dreht sich und skaliert mit dem Abstand.
-- Die Lage kannst du per Finger relativ zum Körperteil feinjustieren. Das bleibt beim Bewegen erhalten.
-- Im Modus **Frei platzieren** gibt es kein Tracking, z. B. für Hand, Hals oder Fuß.
-- Mit **Foto** speicherst du einen Schnappschuss mit Hauteffekt in der Galerie.
+**Foto-Anprobe**
+- Körperfoto aufnehmen oder wählen, Tattoo verschieben, skalieren und drehen. Mit Hauteffekt (Multiplizieren). Das Ergebnis wird als JPG gespeichert.
 
-> Hinweis zur AR: Die Körpererkennung braucht etwas Kontext. Für einen Unterarm sollten Ellbogen und Handgelenk gut sichtbar sein, am besten auch die Schulter. Am einfachsten funktioniert es vor einem Spiegel, wenn eine zweite Person filmt oder mit der Frontkamera. Die Platzierung ist eine flache 2D-Projektion: Das Tattoo folgt Position, Drehung und Größe, wickelt sich aber nicht um die Rundung des Arms.
+**AR-Live-Ansicht**
+- Kamerabild und Tattoo sind sofort sichtbar. Das Tattoo schwebt zunächst gestrichelt umrandet in der Mitte.
+- **Antippen** der gewünschten Körperstelle verankert das Tattoo dort. Ab dann verfolgt die App diese Hautstelle im Bild (OpenCV: Optical Flow + Homographie). Das Tattoo bleibt an der Stelle, auch wenn sich die Kamera bewegt, und passt sich der Perspektive an. Eine Ganzkörperaufnahme ist nicht nötig, ein Unterarm im Bild genügt.
+- **Wölbung**: legt das Tattoo um die Rundung von Arm oder Bein.
+- 1 Finger verschiebt, 2 Finger drehen und skalieren, auch im verankerten Zustand.
+- **↺ Lösen** gibt das Tattoo frei, dann kannst du neu antippen.
+- **⏸ Standbild** friert das Bild ein, dort kannst du weiter justieren. **Als JPG speichern** sichert das Bild mit Hauteffekt.
+- Tipps fürs Tracking: gutes Licht, Kamera ruhig und nicht zu schnell bewegen. Etwas Struktur im Bereich (Hautfalten, Armkante, Muttermale) hilft.
 
 ## APK erzeugen – Variante A: GitHub (ohne Installation am PC)
 
@@ -48,11 +46,11 @@ Mit der App kannst du ein Tattoo aus einem Foto freistellen (z. B. aus einem Pin
 ## Technik
 
 - Kotlin, Android 10+ (minSdk 29), keine Internetverbindung nötig.
-- CameraX 1.4 + `camera-mlkit-vision` (Koordinaten werden automatisch auf die Vorschau umgerechnet).
-- ML Kit Pose Detection (gebündeltes Modell, 33 Körperpunkte).
+- CameraX 1.4 (Analyse-Transformation Puffer → Vorschau über `COORDINATE_SYSTEM_VIEW_REFERENCED`).
+- OpenCV 4.10 (Lucas-Kanade Optical Flow, RANSAC-Homographie).
 - Freistellen: Lasso-Maske, Hautfarb-Proben (Tinten-Verhältnis bzw. Farbabstand) mit weicher Kante und Farbdekontamination an halbtransparenten Pixeln sowie Pinsel. Bis zu 10 Rückgängig-Schritte.
 - Projektstruktur: `app/src/main/java/at/tattoo/tryon/`
   - `ExtractActivity`, `ExtractView`, `Extractor`: Freistellen
   - `TryOnActivity`, `TryOnView`: Foto-Anprobe
-  - `ArActivity`, `ArOverlayView`: AR-Live-Ansicht
+  - `ArActivity`, `ArOverlayView`, `TattooTracker`: AR-Live-Ansicht
   - `Common.kt`: Laden/Speichern, Tattoo-Bibliothek, Auswahl-Dialog
