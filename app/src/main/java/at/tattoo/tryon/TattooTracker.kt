@@ -5,6 +5,7 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.view.CameraController
 import org.opencv.calib3d.Calib3d
+import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.MatOfByte
@@ -14,6 +15,7 @@ import org.opencv.core.MatOfPoint2f
 import org.opencv.core.Point
 import org.opencv.core.Scalar
 import org.opencv.core.Size
+import org.opencv.imgproc.CLAHE
 import org.opencv.imgproc.Imgproc
 import org.opencv.video.Video
 import kotlin.math.abs
@@ -57,6 +59,15 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
     private var bytes = ByteArray(0)
     private var failures = 0
     private var lastStable: Boolean? = null
+    private var frameCount = 0
+
+    // Hautfarbe (Cb/Cr) an der angetippten Stelle: Merkmale werden nur auf dieser Körperstelle gesucht,
+    // nicht im Hintergrund. Sonst "gewinnt" bei einer Hand-Drehung der stillstehende Hintergrund.
+    private var refCb = -1f
+    private var refCr = -1f
+    private var cbBytes = ByteArray(0)
+    private var crBytes = ByteArray(0)
+    private var clahe: CLAHE? = null
 
     override fun getTargetCoordinateSystem(): Int = CameraController.COORDINATE_SYSTEM_VIEW_REFERENCED
 
@@ -90,6 +101,8 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
             releaseState()
             restartRequested = false
             failures = 0
+            refCb = -1f
+            refCr = -1f
         }
         if (!active) {
             releaseState()
@@ -105,6 +118,10 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
         if (!b2v.invert(v2b)) return
 
         val gray = toGray(image)
+        // Kontrast lokal anheben -> mehr verfolgbare Hautstruktur (Poren, Falten, Härchen)
+        val cl = clahe ?: Imgproc.createCLAHE(2.5, Size(8.0, 8.0)).also { clahe = it }
+        cl.apply(gray, gray)
+        frameCount++
 
         var points: MatOfPoint2f? = null
         val prev = prevGray
@@ -114,9 +131,26 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
             val status = MatOfByte()
             val err = MatOfFloat()
             Video.calcOpticalFlowPyrLK(prev, gray, prevP, next, status, err, Size(21.0, 21.0), 3)
+            // Rückwärts-Kontrolle: nur Punkte behalten, die zurückverfolgt wieder am Ausgangspunkt landen
+            val back = MatOfPoint2f()
+            val status2 = MatOfByte()
+            val err2 = MatOfFloat()
+            Video.calcOpticalFlowPyrLK(gray, prev, next, back, status2, err2, Size(21.0, 21.0), 3)
             val p0 = prevP.toArray()
             val p1 = next.toArray()
+            val pb = back.toArray()
             val st = status.toArray()
+            val st2 = status2.toArray()
+            back.release(); status2.release(); err2.release()
+            for (i in st.indices) {
+                if (i >= st2.size || i >= pb.size || st2[i].toInt() != 1) {
+                    st[i] = 0
+                } else {
+                    val ex = pb[i].x - p0[i].x
+                    val ey = pb[i].y - p0[i].y
+                    if (ex * ex + ey * ey > 1.0) st[i] = 0
+                }
+            }
             val src = ArrayList<Point>()
             val dst = ArrayList<Point>()
             val w = gray.cols().toDouble()
@@ -138,7 +172,7 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
                 val srcM = MatOfPoint2f(*src.toTypedArray())
                 val dstM = MatOfPoint2f(*dst.toTypedArray())
                 val mask = Mat()
-                val hom = Calib3d.findHomography(srcM, dstM, Calib3d.RANSAC, 3.0, mask)
+                val hom = Calib3d.findHomography(srcM, dstM, Calib3d.RANSAC, 2.5, mask)
                 if (!hom.empty() && plausible(hom, w, h)) {
                     hb = toMatrix3(hom)
                     val m = ByteArray(mask.rows() * mask.cols())
@@ -172,8 +206,8 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
         }
 
         // Neue Merkmale im Tattoo-Bereich suchen
-        if (reseedRequested || points == null || points.rows() < 25) {
-            val seeded = seed(gray, v2b)
+        if (reseedRequested || points == null || points.rows() < 40 || frameCount % 20 == 0) {
+            val seeded = seed(gray, v2b, image)
             if (seeded != null && seeded.rows() >= 6) {
                 points?.release()
                 points = seeded
@@ -194,7 +228,7 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
     }
 
     /** Sucht gut verfolgbare Punkte im (leicht vergrößerten) Tattoo-Viereck. */
-    private fun seed(gray: Mat, v2b: Matrix): MatOfPoint2f? {
+    private fun seed(gray: Mat, v2b: Matrix, image: ImageProxy): MatOfPoint2f? {
         val quad = listener.currentQuad() ?: return null
         val pts = quad.copyOf()
         v2b.mapPoints(pts)
@@ -204,19 +238,40 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
             cx += pts[i * 2]; cy += pts[i * 2 + 1]
         }
         cx /= 4f; cy /= 4f
-        val grow = 1.35f
+        val grow = 2.0f
         val poly = Array(4) { i ->
             Point(
                 (cx + (pts[i * 2] - cx) * grow).toDouble(),
                 (cy + (pts[i * 2 + 1] - cy) * grow).toDouble()
             )
         }
-        val mask = Mat.zeros(gray.size(), CvType.CV_8UC1)
+        val roi = Mat.zeros(gray.size(), CvType.CV_8UC1)
         val polyM = MatOfPoint(*poly)
-        Imgproc.fillConvexPoly(mask, polyM, Scalar(255.0))
+        Imgproc.fillConvexPoly(roi, polyM, Scalar(255.0))
+        polyM.release()
+
+        // Nur auf der Körperstelle (Hautfarbe wie an der angetippten Stelle) suchen
+        var mask = roi
+        val skin = try {
+            skinMask(image, cx, cy)
+        } catch (t: Throwable) {
+            null
+        }
+        if (skin != null) {
+            val combined = Mat()
+            Core.bitwise_and(skin, roi, combined)
+            skin.release()
+            if (Core.countNonZero(combined) > 1500) {
+                mask = combined
+                roi.release()
+            } else {
+                combined.release()
+            }
+        }
+
         val corners = MatOfPoint()
-        Imgproc.goodFeaturesToTrack(gray, corners, 220, 0.003, 5.0, mask, 5, false, 0.04)
-        mask.release(); polyM.release()
+        Imgproc.goodFeaturesToTrack(gray, corners, 250, 0.002, 5.0, mask, 5, false, 0.04)
+        mask.release()
         if (corners.empty()) {
             corners.release()
             return null
@@ -224,6 +279,97 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
         val arr = corners.toArray()
         corners.release()
         return MatOfPoint2f(*Array(arr.size) { Point(arr[it].x, arr[it].y) })
+    }
+
+    /**
+     * Maske der Körperstelle: Pixel mit ähnlicher Hautfarbe (Cb/Cr) wie an der angetippten Stelle,
+     * zusammenhängend mit dieser Stelle. Volle Puffer-Auflösung, 255 = Haut.
+     */
+    private fun skinMask(image: ImageProxy, cx: Float, cy: Float): Mat? {
+        val w = image.width
+        val h = image.height
+        val cw = w / 2
+        val ch = h / 2
+        if (cw < 4 || ch < 4) return null
+        if (cbBytes.size != cw * ch) {
+            cbBytes = ByteArray(cw * ch)
+            crBytes = ByteArray(cw * ch)
+        }
+        readChroma(image.planes[1], cw, ch, cbBytes)
+        readChroma(image.planes[2], cw, ch, crBytes)
+
+        // Referenz-Hautfarbe rund um die Tattoo-Mitte
+        val ccx = (cx / 2f).toInt().coerceIn(0, cw - 1)
+        val ccy = (cy / 2f).toInt().coerceIn(0, ch - 1)
+        val r = 5
+        var sCb = 0f
+        var sCr = 0f
+        var cnt = 0
+        for (y in (ccy - r).coerceAtLeast(0)..(ccy + r).coerceAtMost(ch - 1)) {
+            for (x in (ccx - r).coerceAtLeast(0)..(ccx + r).coerceAtMost(cw - 1)) {
+                sCb += (cbBytes[y * cw + x].toInt() and 0xFF)
+                sCr += (crBytes[y * cw + x].toInt() and 0xFF)
+                cnt++
+            }
+        }
+        if (cnt == 0) return null
+        val curCb = sCb / cnt
+        val curCr = sCr / cnt
+        if (refCb < 0f) {
+            refCb = curCb
+            refCr = curCr
+        } else if (kotlin.math.abs(curCb - refCb) < 20f && kotlin.math.abs(curCr - refCr) < 20f) {
+            // Langsam an Lichtänderungen anpassen
+            refCb = refCb * 0.8f + curCb * 0.2f
+            refCr = refCr * 0.8f + curCr * 0.2f
+        }
+
+        val bin = ByteArray(cw * ch)
+        for (i in 0 until cw * ch) {
+            val dcb = (cbBytes[i].toInt() and 0xFF) - refCb
+            val dcr = (crBytes[i].toInt() and 0xFF) - refCr
+            if (dcb * dcb / (14f * 14f) + dcr * dcr / (12f * 12f) <= 1f) bin[i] = -1
+        }
+        val small = Mat(ch, cw, CvType.CV_8UC1)
+        small.put(0, 0, bin)
+        val k3 = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(3.0, 3.0))
+        val k7 = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(7.0, 7.0))
+        Imgproc.morphologyEx(small, small, Imgproc.MORPH_OPEN, k3)
+        Imgproc.morphologyEx(small, small, Imgproc.MORPH_CLOSE, k7)
+
+        // Zusammenhängender Bereich, der die Tattoo-Mitte enthält
+        val labels = Mat()
+        Imgproc.connectedComponents(small, labels, 8, CvType.CV_32S)
+        val lab = labels.get(ccy, ccx)?.getOrNull(0)?.toInt() ?: 0
+        small.release()
+        if (lab <= 0) {
+            labels.release(); k3.release(); k7.release()
+            return null
+        }
+        val comp = Mat()
+        Core.compare(labels, Scalar(lab.toDouble()), comp, Core.CMP_EQ)
+        labels.release()
+        val full = Mat()
+        Imgproc.resize(comp, full, Size(w.toDouble(), h.toDouble()), 0.0, 0.0, Imgproc.INTER_NEAREST)
+        comp.release()
+        // Rand etwas abtragen, damit keine Hintergrund-Kanten mitverfolgt werden
+        Imgproc.erode(full, full, k7)
+        k3.release(); k7.release()
+        return full
+    }
+
+    private fun readChroma(plane: ImageProxy.PlaneProxy, cw: Int, ch: Int, out: ByteArray) {
+        val buf = plane.buffer
+        val rs = plane.rowStride
+        val ps = plane.pixelStride
+        val limit = buf.limit()
+        for (y in 0 until ch) {
+            val row = y * rs
+            for (x in 0 until cw) {
+                val idx = row + x * ps
+                out[y * cw + x] = if (idx < limit) buf.get(idx) else 0
+            }
+        }
     }
 
     private fun toGray(image: ImageProxy): Mat {
