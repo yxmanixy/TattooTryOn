@@ -70,6 +70,20 @@ class ArOverlayView @JvmOverloads constructor(
     var curvature = 0.45f
         private set
 
+    /** Zum Prüfen: verfolgte Punkte anzeigen. */
+    var showPoints = false
+        set(value) {
+            field = value
+            invalidate()
+        }
+    private var trackedPoints: FloatArray? = null
+    private val pointPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF39FF88.toInt() }
+
+    fun setTrackedPoints(p: FloatArray?) {
+        trackedPoints = p
+        if (showPoints) invalidate()
+    }
+
     private val density = resources.displayMetrics.density
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
     private val main = Handler(Looper.getMainLooper())
@@ -236,6 +250,15 @@ class ArOverlayView @JvmOverloads constructor(
             drawTattoo(canvas, multiply = true)
         } else {
             drawTattoo(canvas, multiply = false)
+        }
+        if (showPoints && frame == null) {
+            trackedPoints?.let { p ->
+                var i = 0
+                while (i + 1 < p.size) {
+                    canvas.drawCircle(p[i], p[i + 1], 3f * density, pointPaint)
+                    i += 2
+                }
+            }
         }
         if (!anchored && quadValid && frame == null) {
             outlinePath.reset()

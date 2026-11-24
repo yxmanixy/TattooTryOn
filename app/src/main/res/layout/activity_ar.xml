@@ -139,7 +139,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginEnd="4dp"
                 android:layout_weight="1"
-                android:text="Tattoo wählen" />
+                android:text="Tattoo" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnSwitch"
@@ -147,8 +147,18 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="4dp"
+                android:layout_marginEnd="4dp"
                 android:layout_weight="1"
-                android:text="Kamera wechseln" />
+                android:text="Kamera" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnPoints"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:layout_weight="1"
+                android:text="Punkte" />
         </LinearLayout>
     </LinearLayout>
 </FrameLayout>

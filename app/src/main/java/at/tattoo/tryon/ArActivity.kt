@@ -83,6 +83,10 @@ class ArActivity : AppCompatActivity(), ArOverlayView.Listener, TattooTracker.Li
         btnFreeze.setOnClickListener { if (overlay.frozenFrame == null) freeze() else unfreeze() }
         findViewById<MaterialButton>(R.id.btnSave).setOnClickListener { saveJpg() }
         findViewById<MaterialButton>(R.id.btnSwitch).setOnClickListener { switchCamera() }
+        findViewById<MaterialButton>(R.id.btnPoints).setOnClickListener {
+            overlay.showPoints = !overlay.showPoints
+            (it as MaterialButton).text = if (overlay.showPoints) "Punkte aus" else "Punkte"
+        }
         findViewById<MaterialButton>(R.id.btnTattoo).setOnClickListener {
             TattooPicker.show(this) { loadTattoo(it.absolutePath) }
         }
@@ -166,6 +170,7 @@ class ArActivity : AppCompatActivity(), ArOverlayView.Listener, TattooTracker.Li
     private fun releaseTattoo() {
         if (overlay.frozenFrame != null) unfreeze()
         tracker?.active = false
+        overlay.setTrackedPoints(null)
         overlay.release()
         updateStatus()
     }
@@ -263,6 +268,10 @@ class ArActivity : AppCompatActivity(), ArOverlayView.Listener, TattooTracker.Li
     }
 
     override fun currentQuad(): FloatArray? = overlay.quadForTracking()
+
+    override fun onPoints(points: FloatArray) {
+        runOnUiThread { overlay.setTrackedPoints(points) }
+    }
 
     override fun onDestroy() {
         super.onDestroy()

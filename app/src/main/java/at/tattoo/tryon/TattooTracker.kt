@@ -36,6 +36,9 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
 
         /** Aktuelles Tattoo-Viereck (8 Werte, View-Koordinaten) oder null. Analyse-Thread! */
         fun currentQuad(): FloatArray?
+
+        /** Aktuell verfolgte Punkte (View-Koordinaten, x/y abwechselnd). Analyse-Thread! */
+        fun onPoints(points: FloatArray) {}
     }
 
     @Volatile
@@ -219,6 +222,17 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
         if (stable != lastStable) {
             lastStable = stable
             listener.onTrackingState(stable)
+        }
+
+        points?.let {
+            val arr = it.toArray()
+            val f = FloatArray(arr.size * 2)
+            for (i in arr.indices) {
+                f[i * 2] = arr[i].x.toFloat()
+                f[i * 2 + 1] = arr[i].y.toFloat()
+            }
+            b2v.mapPoints(f)
+            listener.onPoints(f)
         }
 
         prevGray?.release()
