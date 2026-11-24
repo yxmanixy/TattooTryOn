@@ -34,6 +34,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         setSupportActionBar(findViewById<MaterialToolbar>(R.id.toolbar))
         supportActionBar?.title = getString(R.string.app_name)
+        supportActionBar?.subtitle = "by Martin Toth"
 
         findViewById<MaterialButton>(R.id.btnImport).setOnClickListener {
             importLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))

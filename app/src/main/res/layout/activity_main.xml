@@ -89,5 +89,14 @@
                 android:text="Noch keine Tattoos gespeichert.\nTippe auf „Tattoos hinzufügen“ und wähle ein oder mehrere Fotos – die Tattoos werden automatisch erkannt und freigestellt."
                 android:textColor="#80FFFFFF" />
         </FrameLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center"
+            android:text="Tattoo Try-On · by Martin Toth"
+            android:textColor="#80FFFFFF"
+            android:textSize="12sp" />
     </LinearLayout>
 </LinearLayout>

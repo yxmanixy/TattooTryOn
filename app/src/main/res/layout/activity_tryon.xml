@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical">
@@ -93,6 +94,137 @@
                 android:valueTo="1.0" />
         </LinearLayout>
 
+        <!-- Panel: Körperform -->
+        <LinearLayout
+            android:id="@+id/panelShape"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/shapeInfo"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Rundung, Schatten und Falten werden aus dem Foto berechnet."
+                android:textColor="#99FFFFFF"
+                android:textSize="12sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/SectionLabel"
+                    android:layout_width="90dp"
+                    android:text="Körperform" />
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/sliderForm"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:value="0.0"
+                    android:valueFrom="0.0"
+                    android:valueTo="1.0" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/SectionLabel"
+                    android:layout_width="90dp"
+                    android:text="Falten" />
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/sliderFolds"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:value="0.0"
+                    android:valueFrom="0.0"
+                    android:valueTo="1.0" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Panel: Farbe -->
+        <LinearLayout
+            android:id="@+id/panelColor"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/SectionLabel"
+                    android:layout_width="90dp"
+                    android:text="Hautangleich" />
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/sliderInk"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:value="0.0"
+                    android:valueFrom="0.0"
+                    android:valueTo="1.0" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/SectionLabel"
+                    android:layout_width="90dp"
+                    android:text="Sättigung" />
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/sliderSat"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:value="1.0"
+                    android:valueFrom="0.0"
+                    android:valueTo="1.5" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/SectionLabel"
+                    android:layout_width="90dp"
+                    android:text="Helligkeit" />
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/sliderBright"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:value="0.0"
+                    android:valueFrom="-0.3"
+                    android:valueTo="0.3" />
+            </LinearLayout>
+        </LinearLayout>
+
         <HorizontalScrollView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -101,15 +233,40 @@
             <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:gravity="center_vertical"
                 android:orientation="horizontal">
+
+                <com.google.android.material.chip.ChipGroup
+                    android:id="@+id/panelGroup"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    app:selectionRequired="false"
+                    app:singleLine="true"
+                    app:singleSelection="true">
+
+                    <com.google.android.material.chip.Chip
+                        android:id="@+id/chipShape"
+                        style="@style/Widget.Material3.Chip.Filter"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Körperform" />
+
+                    <com.google.android.material.chip.Chip
+                        android:id="@+id/chipColor"
+                        style="@style/Widget.Material3.Chip.Filter"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Farbe" />
+                </com.google.android.material.chip.ChipGroup>
 
                 <com.google.android.material.chip.Chip
                     android:id="@+id/chipMultiply"
                     style="@style/Widget.Material3.Chip.Filter"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
                     android:checked="true"
-                    android:text="Hauteffekt (realistisch)" />
+                    android:text="Hauteffekt" />
 
                 <com.google.android.material.chip.Chip
                     android:id="@+id/chipFlip"

@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BlendMode
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.util.AttributeSet
@@ -46,6 +47,20 @@ class TryOnView @JvmOverloads constructor(
             invalidate()
         }
 
+    /** Wird nach dem Ende einer Verschiebung/Drehung aufgerufen (z. B. zum Neuberechnen der Körperform). */
+    var onTransformChanged: (() -> Unit)? = null
+
+    /** An die Körperform angepasste Tattoo-Ebene (oder null = unverändertes Tattoo). */
+    private var fitLayer: Bitmap? = null
+    private val fitMatrix = Matrix()
+
+    /** Farbangleichung der Tinte. */
+    var inkFilter: ColorFilter? = null
+        set(value) {
+            field = value
+            invalidate()
+        }
+
     private val density = resources.displayMetrics.density
     private val tattooPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private val bodyPaint = Paint(Paint.FILTER_BITMAP_FLAG)
@@ -76,13 +91,36 @@ class TryOnView @JvmOverloads constructor(
         val s = targetW / t.width
         tattooMatrix.setScale(s, s)
         tattooMatrix.postTranslate(b.width / 2f - t.width * s / 2f, b.height / 2f - t.height * s / 2f)
+        changed()
+    }
+
+    private fun changed() {
+        fitLayer = null
         invalidate()
+        onTransformChanged?.invoke()
+    }
+
+    fun setFit(layer: Bitmap?, layerToBody: Matrix?) {
+        fitLayer = layer
+        if (layerToBody != null) fitMatrix.set(layerToBody)
+        invalidate()
+    }
+
+    fun tattooMatrixCopy(): Matrix = Matrix(tattooMatrix)
+
+    /** Mittelpunkt des Tattoos in Foto-Koordinaten und ungefährer Radius. */
+    fun tattooCenterInBody(): FloatArray? {
+        val t = tattoo ?: return null
+        val p = floatArrayOf(t.width / 2f, t.height / 2f)
+        tattooMatrix.mapPoints(p)
+        val r = tattooMatrix.mapRadius(min(t.width, t.height) / 2f)
+        return floatArrayOf(p[0], p[1], r)
     }
 
     fun flipTattoo() {
         val t = tattoo ?: return
         tattooMatrix.preScale(-1f, 1f, t.width / 2f, t.height / 2f)
-        invalidate()
+        changed()
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -104,7 +142,10 @@ class TryOnView @JvmOverloads constructor(
         val t = tattoo ?: return
         tattooPaint.alpha = (opacity * 255).toInt().coerceIn(0, 255)
         tattooPaint.blendMode = if (multiply) BlendMode.MULTIPLY else null
-        canvas.drawBitmap(t, tattooMatrix, tattooPaint)
+        tattooPaint.colorFilter = inkFilter
+        val fit = fitLayer
+        if (fit != null) canvas.drawBitmap(fit, fitMatrix, tattooPaint)
+        else canvas.drawBitmap(t, tattooMatrix, tattooPaint)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -136,6 +177,7 @@ class TryOnView @JvmOverloads constructor(
 
     // ---------- Gesten ----------
 
+    private var gestureMoved = false
     private var dragging = false
     private var multi = false
     private var lastX = 0f
@@ -188,11 +230,15 @@ class TryOnView @JvmOverloads constructor(
                     tattooMatrix.postRotate(r[3] - lastAngle, lastMidX, lastMidY)
                     tattooMatrix.postTranslate(r[0] - lastMidX, r[1] - lastMidY)
                     lastMidX = r[0]; lastMidY = r[1]; lastDist = r[2]; lastAngle = r[3]
+                    gestureMoved = true
+                    fitLayer = null
                     invalidate()
                 } else if (dragging) {
                     val p = toBody(e.x, e.y)
                     tattooMatrix.postTranslate(p[0] - lastX, p[1] - lastY)
                     lastX = p[0]; lastY = p[1]
+                    gestureMoved = true
+                    fitLayer = null
                     invalidate()
                 }
             }
@@ -209,6 +255,8 @@ class TryOnView @JvmOverloads constructor(
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 dragging = false
                 multi = false
+                if (gestureMoved) changed()
+                gestureMoved = false
             }
         }
         return true

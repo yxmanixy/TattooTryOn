@@ -1,5 +1,7 @@
 # Tattoo Try-On (Android)
 
+*by Martin Toth*
+
 Mit der App kannst du ein Tattoo aus einem Foto freistellen (z. B. aus einem Pinterest-Bild). Das Ergebnis lässt sich auf ein eigenes Körperfoto legen oder live per Kamera (AR mit Körpererkennung) am Körper ansehen.
 
 ## Funktionen
@@ -16,6 +18,8 @@ Mit der App kannst du ein Tattoo aus einem Foto freistellen (z. B. aus einem Pin
 
 **Foto-Anprobe**
 - Körperfoto aufnehmen oder wählen, Tattoo verschieben, skalieren und drehen. Mit Hauteffekt (Multiplizieren). Das Ergebnis wird als JPG gespeichert.
+- **Körperform**: Aus dem Foto werden die Silhouette der Körperstelle (Rundung), die großräumige Schattierung und feine Falten berechnet. Das Tattoo wird danach verzerrt (Displacement), an der Körperkante ausgeblendet und in Falten abgedunkelt. Regler: *Körperform*, *Falten*.
+- **Farbe**: *Hautangleich* (weniger Sättigung, weicheres Schwarz, Hautton scheint durch), *Sättigung*, *Helligkeit*.
 
 **AR-Live-Ansicht**
 - Kamerabild und Tattoo sind sofort sichtbar. Das Tattoo schwebt zunächst gestrichelt umrandet in der Mitte.
