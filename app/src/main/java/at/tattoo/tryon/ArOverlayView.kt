@@ -133,33 +133,57 @@ class ArOverlayView @JvmOverloads constructor(
             invalidate()
         }
 
-    /** Geglättete Körperform [ax, ay, dx, dy, nx, ny, halbe Breite] in View-Koordinaten. */
-    private var limb: FloatArray? = null
+    /**
+     * Körperform [ax, ay, dx, dy, nx, ny, halbe Breite] im REFERENZ-System (Moment des Verankerns).
+     * Sie bewegt sich dadurch starr mit dem Tattoo mit und springt nicht bei jeder neuen Messung.
+     */
+    private var limbRef: FloatArray? = null
     private var limbMisses = 0
 
-    val hasLimb: Boolean get() = limb != null
+    val hasLimb: Boolean get() = limbRef != null
 
-    /** Neue Messung der Körperform vom Tracker (UI-Thread). */
+    private fun mapLimb(l: FloatArray, m: Matrix): FloatArray {
+        val p = floatArrayOf(
+            l[0], l[1],
+            l[0] + l[2] * 100f, l[1] + l[3] * 100f,
+            l[0] + l[4] * l[6], l[1] + l[5] * l[6]
+        )
+        m.mapPoints(p)
+        val dl = hypot(p[2] - p[0], p[3] - p[1]).coerceAtLeast(1e-4f)
+        val nl = hypot(p[4] - p[0], p[5] - p[1]).coerceAtLeast(1e-4f)
+        return floatArrayOf(
+            p[0], p[1], (p[2] - p[0]) / dl, (p[3] - p[1]) / dl,
+            (p[4] - p[0]) / nl, (p[5] - p[1]) / nl, nl
+        )
+    }
+
+    /** Aktuelle Körperform in View-Koordinaten. */
+    private fun limbCurrent(): FloatArray? = limbRef?.let { mapLimb(it, lastT) }
+
+    /** Neue Messung der Körperform vom Tracker (View-Koordinaten, UI-Thread). */
     fun setLimb(l: FloatArray?) {
         if (l == null) {
             limbMisses++
-            if (limbMisses > 6) limb = null
+            if (limbMisses > 8) limbRef = null
             invalidate()
             return
         }
         limbMisses = 0
-        val cur = limb
+        val inv = Matrix()
+        if (!lastT.invert(inv)) inv.reset()
+        val r = mapLimb(l, inv)
+        val cur = limbRef
         if (cur == null) {
-            limb = l.copyOf()
+            limbRef = r
         } else {
-            // Richtung ggf. umdrehen, damit nicht zwischen +/- gesprungen wird
-            if (cur[2] * l[2] + cur[3] * l[3] < 0f) {
-                l[2] = -l[2]; l[3] = -l[3]
+            if (cur[2] * r[2] + cur[3] * r[3] < 0f) {
+                r[2] = -r[2]; r[3] = -r[3]
             }
-            if (cur[4] * l[4] + cur[5] * l[5] < 0f) {
-                l[4] = -l[4]; l[5] = -l[5]
+            if (cur[4] * r[4] + cur[5] * r[5] < 0f) {
+                r[4] = -r[4]; r[5] = -r[5]
             }
-            for (i in 0 until 7) cur[i] += (l[i] - cur[i]) * 0.35f
+            // Langsam nachführen: die Form eines Arms ändert sich nicht sprunghaft
+            for (i in 0 until 7) cur[i] += (r[i] - cur[i]) * 0.2f
             val ld = hypot(cur[2], cur[3]).coerceAtLeast(1e-4f)
             cur[2] /= ld; cur[3] /= ld
             val ln = hypot(cur[4], cur[5]).coerceAtLeast(1e-4f)
@@ -169,7 +193,7 @@ class ArOverlayView @JvmOverloads constructor(
     }
 
     fun clearLimb() {
-        limb = null
+        limbRef = null
         limbMisses = 0
         invalidate()
     }
@@ -222,6 +246,7 @@ class ArOverlayView @JvmOverloads constructor(
     /** Aktuelle Lage wird zur neuen Ausgangslage (beim Verankern / nach dem Standbild). */
     fun resetReference() {
         System.arraycopy(quad, 0, refQuad, 0, 8)
+        limbRef = limbCurrent()
         lastT.reset()
         refSnapshot = refQuad.copyOf()
     }
@@ -255,6 +280,7 @@ class ArOverlayView @JvmOverloads constructor(
     /** Löst das Tattoo und setzt es zurück in die Bildmitte. */
     fun release() {
         anchored = false
+        lastT.reset()
         val t = tattoo
         if (t != null && width > 0) resetQuad(width / 2f, height / 2f, t) else quadValid = false
         invalidate()
@@ -344,7 +370,7 @@ class ArOverlayView @JvmOverloads constructor(
      * (Achse entlang der Tattoo-Höhe, Breite etwas größer als das Tattoo).
      */
     private fun shapeFrame(): FloatArray? {
-        limb?.let { return it }
+        limbCurrent()?.let { return it }
         if (!anchored) return null
         val topX = (quad[0] + quad[2]) / 2f
         val topY = (quad[1] + quad[3]) / 2f
@@ -374,7 +400,7 @@ class ArOverlayView @JvmOverloads constructor(
             drawTattoo(canvas, multiply = false)
         }
         if (showPoints && frame == null) {
-            limb?.let { l ->
+            limbCurrent()?.let { l ->
                 val len = max(width, height).toFloat()
                 for (side in -1..1) {
                     val ox = l[0] + l[4] * l[6] * side

@@ -107,6 +107,58 @@ class TattooTracker(context: Context, private val listener: Listener) : ImageAna
     private var crBytes = ByteArray(0)
     private var clahe: CLAHE? = null
 
+    // Geglättete Drehung/Größe (Verschiebung bleibt unverzögert)
+    private var smInit = false
+    private var smScale = 1f
+    private var smAngle = 0f
+
+    /**
+     * Beruhigt Drehung und Größe (Messrauschen erzeugt sonst ein "Verdrehen" bei reinen
+     * Kamera-Verschiebungen). Der Tattoo-Mittelpunkt folgt dagegen ohne Verzögerung.
+     */
+    private fun stabilize(raw: Matrix, refQuad: FloatArray?): Matrix {
+        val v = FloatArray(9)
+        raw.getValues(v)
+        val scale = hypot(v[0], v[3])
+        val angle = atan2(v[3], v[0])
+        var cx = 0f
+        var cy = 0f
+        if (refQuad != null) {
+            for (i in 0 until 4) {
+                cx += refQuad[i * 2]; cy += refQuad[i * 2 + 1]
+            }
+            cx /= 4f; cy /= 4f
+        } else if (refPts.isNotEmpty()) {
+            for (p in refPts) {
+                cx += p.x.toFloat(); cy += p.y.toFloat()
+            }
+            cx /= refPts.size; cy /= refPts.size
+        }
+        val c = floatArrayOf(cx, cy)
+        raw.mapPoints(c)
+        if (!smInit) {
+            smInit = true
+            smScale = scale
+            smAngle = angle
+        } else {
+            var d = angle - smAngle
+            val pi = Math.PI.toFloat()
+            while (d > pi) d -= 2f * pi
+            while (d < -pi) d += 2f * pi
+            // Sehr kleine Änderungen fast ignorieren (Rauschen), größere zügig übernehmen
+            val k = if (abs(d) < 0.02f) 0.15f else 0.5f
+            smAngle += d * k
+            val ds = scale - smScale
+            smScale += ds * (if (abs(ds) < 0.01f * smScale) 0.15f else 0.5f)
+        }
+        val m = Matrix()
+        m.setTranslate(-cx, -cy)
+        m.postScale(smScale, smScale)
+        m.postRotate(Math.toDegrees(smAngle.toDouble()).toFloat())
+        m.postTranslate(c[0], c[1])
+        return m
+    }
+
     /** true = Körperstelle verloren, es wird nur noch über das Referenzbild gesucht. */
     private var lost = false
 
@@ -172,6 +224,7 @@ class TattooTracker(context: Context, private val listener: Listener) : ImageAna
             refCb = -1f
             refCr = -1f
             hCur.reset()
+            smInit = false
             lost = false
             keyDesc?.release()
             keyDesc = null
@@ -293,8 +346,9 @@ class TattooTracker(context: Context, private val listener: Listener) : ImageAna
         }
 
         if (okThisFrame) {
+            val out = stabilize(hCur, refQuadB)
             val tv = Matrix(v2b)
-            tv.postConcat(hCur)
+            tv.postConcat(out)
             tv.postConcat(b2v)
             listener.onTransform(tv, gen)
         }
@@ -491,15 +545,15 @@ class TattooTracker(context: Context, private val listener: Listener) : ImageAna
         val srcM = MatOfPoint2f(*src.toTypedArray())
         val dstM = MatOfPoint2f(*dst.toTypedArray())
         val inl = Mat()
-        val hom = Calib3d.findHomography(srcM, dstM, Calib3d.RANSAC, 4.0, inl)
+        val aff = Calib3d.estimateAffinePartial2D(srcM, dstM, inl, Calib3d.RANSAC, 4.0)
         srcM.release(); dstM.release()
-        if (hom.empty()) {
-            hom.release(); inl.release()
+        if (aff.empty()) {
+            aff.release(); inl.release()
             return null
         }
         val count = inliers(inl, src.size).count { it }
-        val res = toMatrix3(hom)
-        hom.release(); inl.release()
+        val res = toMatrixAffine(aff)
+        aff.release(); inl.release()
         // Strenger: genug und anteilig viele übereinstimmende Merkmale, sonst falscher Treffer
         if (count < 15 || count < src.size * 0.3f || !quadOk(res, refQuad, w, h)) return null
         return res
@@ -782,8 +836,9 @@ class TattooTracker(context: Context, private val listener: Listener) : ImageAna
     }
 
     /**
-     * Schätzt Referenz -> aktuell. Zuerst volle Homographie (Perspektive), sonst
-     * Ähnlichkeitstransformation. Prüft, ob das Tattoo-Viereck dabei plausibel bleibt.
+     * Schätzt Referenz -> aktuell als Ähnlichkeitstransformation (Verschiebung, Drehung, Größe).
+     * Eine volle Homographie ist bei Punkten auf einem gewölbten Arm schlecht bestimmt und erzeugt
+     * bei Kamerabewegungen falsche Verzerrungen/Verdrehungen – deshalb bewusst nur 4 Freiheitsgrade.
      */
     private fun estimate(
         ref: List<Point>, cur: List<Point>, refQuad: FloatArray?, w: Double, h: Double
@@ -791,16 +846,6 @@ class TattooTracker(context: Context, private val listener: Listener) : ImageAna
         val srcM = MatOfPoint2f(*ref.toTypedArray())
         val dstM = MatOfPoint2f(*cur.toTypedArray())
         try {
-            val mask = Mat()
-            val hom = Calib3d.findHomography(srcM, dstM, Calib3d.RANSAC, 3.0, mask)
-            if (!hom.empty()) {
-                val m = toMatrix3(hom)
-                val inl = inliers(mask, cur.size)
-                hom.release(); mask.release()
-                if (inl.count { it } >= 8 && quadOk(m, refQuad, w, h)) return Pair(m, inl)
-            } else {
-                hom.release(); mask.release()
-            }
             val inlM = Mat()
             val aff = Calib3d.estimateAffinePartial2D(srcM, dstM, inlM, Calib3d.RANSAC, 3.0)
             if (!aff.empty()) {
