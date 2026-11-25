@@ -11,8 +11,8 @@ android {
         applicationId = "at.tattoo.tryon"
         minSdk = 29
         targetSdk = 34
-        versionCode = 6
-        versionName = "2.4"
+        versionCode = 7
+        versionName = "2.5"
 
         ndk {
             // Nur echte Smartphone-Prozessoren -> deutlich kleinere APK
@@ -20,11 +20,24 @@ android {
         }
     }
 
+    // Fester Signaturschlüssel: Jede neue Version lässt sich über die alte installieren.
+    // (Ohne ihn erzeugt GitHub bei jedem Build einen neuen Schlüssel -> Update schlägt fehl.)
+    signingConfigs {
+        create("shared") {
+            storeFile = file("tattoo.keystore")
+            storePassword = "tattoo-tryon"
+            keyAlias = "tattoo"
+            keyPassword = "tattoo-tryon"
+        }
+    }
+
     buildTypes {
+        getByName("debug") {
+            signingConfig = signingConfigs.getByName("shared")
+        }
         release {
             isMinifyEnabled = false
-            // Zum privaten Sideloaden reicht der Debug-Schlüssel.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("shared")
         }
     }
 
