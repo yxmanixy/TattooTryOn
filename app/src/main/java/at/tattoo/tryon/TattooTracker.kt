@@ -9,12 +9,16 @@ import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.MatOfByte
+import org.opencv.core.MatOfDMatch
 import org.opencv.core.MatOfFloat
+import org.opencv.core.MatOfKeyPoint
 import org.opencv.core.MatOfPoint
 import org.opencv.core.MatOfPoint2f
 import org.opencv.core.Point
 import org.opencv.core.Scalar
 import org.opencv.core.Size
+import org.opencv.features2d.DescriptorMatcher
+import org.opencv.features2d.ORB
 import org.opencv.imgproc.CLAHE
 import org.opencv.imgproc.Imgproc
 import org.opencv.video.Video
@@ -91,6 +95,15 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
     private var crBytes = ByteArray(0)
     private var clahe: CLAHE? = null
 
+    /** true = Körperstelle verloren, es wird nur noch über das Referenzbild gesucht. */
+    private var lost = false
+
+    // Referenzbild (ORB-Merkmale) zum Wiederfinden und gegen Drift
+    private var orb: ORB? = null
+    private var matcher: DescriptorMatcher? = null
+    private var keyDesc: Mat? = null
+    private var keyPts = ArrayList<Point>()
+
     override fun getTargetCoordinateSystem(): Int = CameraController.COORDINATE_SYSTEM_VIEW_REFERENCED
 
     override fun updateTransform(matrix: Matrix?) {
@@ -128,6 +141,10 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
             refCb = -1f
             refCr = -1f
             hCur.reset()
+            lost = false
+            keyDesc?.release()
+            keyDesc = null
+            keyPts = ArrayList()
         }
         if (!active) {
             releaseState()
@@ -148,18 +165,22 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
         cl.apply(gray, gray)
         frameCount++
 
+        val refQuadB = listener.referenceQuad()?.copyOf()?.also { v2b.mapPoints(it) }
+        val gw = gray.cols().toDouble()
+        val gh = gray.rows().toDouble()
+
         // ---------- 1. Punkte vom letzten Bild ins aktuelle verfolgen ----------
         val prev = prevGray
-        if (prev != null && curPts.size >= 6 && prev.cols() == gray.cols() && prev.rows() == gray.rows()) {
+        if (!lost && prev != null && curPts.size >= 6 && prev.cols() == gray.cols() && prev.rows() == gray.rows()) {
             val prevM = MatOfPoint2f(*curPts.toTypedArray())
             val next = MatOfPoint2f()
             val status = MatOfByte()
             val err = MatOfFloat()
-            Video.calcOpticalFlowPyrLK(prev, gray, prevM, next, status, err, Size(21.0, 21.0), 3)
+            Video.calcOpticalFlowPyrLK(prev, gray, prevM, next, status, err, Size(25.0, 25.0), 4)
             val back = MatOfPoint2f()
             val status2 = MatOfByte()
             val err2 = MatOfFloat()
-            Video.calcOpticalFlowPyrLK(gray, prev, next, back, status2, err2, Size(21.0, 21.0), 3)
+            Video.calcOpticalFlowPyrLK(gray, prev, next, back, status2, err2, Size(25.0, 25.0), 4)
             val p0 = curPts
             val p1 = next.toArray()
             val pb = back.toArray()
@@ -168,8 +189,6 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
             prevM.release(); next.release(); status.release(); err.release()
             back.release(); status2.release(); err2.release()
 
-            val w = gray.cols().toDouble()
-            val h = gray.rows().toDouble()
             val newCur = ArrayList<Point>()
             val newRef = ArrayList<Point>()
             for (i in p0.indices) {
@@ -177,23 +196,21 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
                 if (st[i].toInt() != 1 || st2[i].toInt() != 1) continue
                 val ex = pb[i].x - p0[i].x
                 val ey = pb[i].y - p0[i].y
-                if (ex * ex + ey * ey > 1.0) continue
+                if (ex * ex + ey * ey > 4.0) continue
                 val q = p1[i]
-                if (q.x < 0 || q.y < 0 || q.x >= w || q.y >= h) continue
+                if (q.x < 0 || q.y < 0 || q.x >= gw || q.y >= gh) continue
                 newCur.add(q)
                 newRef.add(refPts[i])
             }
             curPts = newCur
             refPts = newRef
-        } else if (prev != null) {
-            curPts = ArrayList()
-            refPts = ArrayList()
         }
 
-        // ---------- 2. Homographie Referenz -> jetzt ----------
-        if (curPts.size >= 8) {
-            val refQuadB = listener.referenceQuad()?.copyOf()?.also { v2b.mapPoints(it) }
-            val est = estimate(refPts, curPts, refQuadB, gray.cols().toDouble(), gray.rows().toDouble())
+        // ---------- 2. Homographie Referenz -> jetzt (aus den verfolgten Punkten) ----------
+        var okThisFrame = false
+        var inlierCount = 0
+        if (!lost && curPts.size >= 8) {
+            val est = estimate(refPts, curPts, refQuadB, gw, gh)
             if (est != null) {
                 hCur.set(est.first)
                 val inl = est.second
@@ -204,58 +221,275 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
                 }
                 curPts = c2
                 refPts = r2
-                failures = 0
-                val tv = Matrix(v2b)
-                tv.postConcat(hCur)
-                tv.postConcat(b2v)
-                listener.onTransform(tv, gen)
-            } else {
-                failures++
+                inlierCount = c2.size
+                okThisFrame = true
             }
-        } else if (frameCount > 1 && prev != null) {
+        }
+        val justStarted = prev == null
+        if (okThisFrame) {
+            failures = 0
+        } else if (!justStarted) {
             failures++
+            if (failures >= 3) {
+                // Verloren: NICHT mit veralteter Lage weitermachen, sondern neu finden
+                lost = true
+                curPts = ArrayList()
+                refPts = ArrayList()
+            }
         }
 
-        // ---------- 3. Neue Punkte ergänzen (Referenzlage über die Umkehrabbildung) ----------
-        if (reseedRequested || curPts.size < 60 || (frameCount % 15 == 0 && curPts.size < 220)) {
-            val added = seed(gray, v2b, image)
+        // ---------- 3. Wiederfinden / Nachkorrigieren über das Referenzbild (ORB-Merkmale) ----------
+        if (keyDesc != null && (lost || frameCount % 8 == 0 || (okThisFrame && inlierCount < 20))) {
+            val reloc = relocalize(gray, image, refQuadB, gw, gh)
+            if (reloc != null) {
+                hCur.set(reloc)
+                okThisFrame = true
+                failures = 0
+                if (lost) {
+                    lost = false
+                    curPts = ArrayList()
+                    refPts = ArrayList()
+                } else {
+                    // Referenzlage der verfolgten Punkte an die (driftfreie) Schätzung angleichen
+                    val inv = Matrix()
+                    if (hCur.invert(inv) && curPts.isNotEmpty()) {
+                        val f = toFloats(curPts)
+                        inv.mapPoints(f)
+                        refPts = toPoints(f)
+                    }
+                }
+            }
+        }
+
+        if (okThisFrame) {
+            val tv = Matrix(v2b)
+            tv.postConcat(hCur)
+            tv.postConcat(b2v)
+            listener.onTransform(tv, gen)
+        }
+
+        // Aktuelle Tattoo-Lage im Puffer (aus der frischen Schätzung, nicht aus der evtl. verzögerten Anzeige)
+        val curQuadB: FloatArray? = if (refQuadB != null) {
+            refQuadB.copyOf().also { hCur.mapPoints(it) }
+        } else {
+            listener.currentQuad()?.copyOf()?.also { v2b.mapPoints(it) }
+        }
+
+        // ---------- 4. Neue Punkte ergänzen – nur wenn die aktuelle Lage gesichert ist ----------
+        if ((okThisFrame || justStarted) && !lost &&
+            (reseedRequested || curPts.size < 60 || (frameCount % 15 == 0 && curPts.size < 220))
+        ) {
+            val added = if (curQuadB != null) seed(gray, curQuadB, image) else emptyList()
             if (added.isNotEmpty()) {
                 val inv = Matrix()
                 if (hCur.invert(inv)) {
-                    val f = FloatArray(added.size * 2)
-                    for (i in added.indices) {
-                        f[i * 2] = added[i].x.toFloat()
-                        f[i * 2 + 1] = added[i].y.toFloat()
-                    }
+                    val f = toFloats(added)
                     inv.mapPoints(f)
+                    val refs = toPoints(f)
                     for (i in added.indices) {
                         if (curPts.size >= 300) break
                         curPts.add(added[i])
-                        refPts.add(Point(f[i * 2].toDouble(), f[i * 2 + 1].toDouble()))
+                        refPts.add(refs[i])
                     }
                     reseedRequested = false
                 }
             }
         }
 
-        val stable = failures < 8 && curPts.size >= 8
+        // Referenzbild für das Wiederfinden anlegen (einmal pro Verankerung)
+        if (keyDesc == null && (okThisFrame || justStarted) && !lost && curQuadB != null) {
+            buildKeyframe(gray, image, curQuadB)
+        }
+
+        val stable = !lost && failures < 3 && curPts.size >= 8
         if (stable != lastStable) {
             lastStable = stable
             listener.onTrackingState(stable)
         }
 
         if (curPts.isNotEmpty()) {
-            val f = FloatArray(curPts.size * 2)
-            for (i in curPts.indices) {
-                f[i * 2] = curPts[i].x.toFloat()
-                f[i * 2 + 1] = curPts[i].y.toFloat()
-            }
+            val f = toFloats(curPts)
             b2v.mapPoints(f)
             listener.onPoints(f)
+        } else {
+            listener.onPoints(FloatArray(0))
         }
 
         prevGray?.release()
         prevGray = gray
+    }
+
+    private fun toFloats(pts: List<Point>): FloatArray {
+        val f = FloatArray(pts.size * 2)
+        for (i in pts.indices) {
+            f[i * 2] = pts[i].x.toFloat()
+            f[i * 2 + 1] = pts[i].y.toFloat()
+        }
+        return f
+    }
+
+    private fun toPoints(f: FloatArray): ArrayList<Point> {
+        val out = ArrayList<Point>(f.size / 2)
+        var i = 0
+        while (i + 1 < f.size) {
+            out.add(Point(f[i].toDouble(), f[i + 1].toDouble()))
+            i += 2
+        }
+        return out
+    }
+
+    // ---------- Referenzbild (ORB) ----------
+
+    /** Merkmale + Beschreibungen der Körperstelle, Positionen in Referenz-Koordinaten. */
+    private fun buildKeyframe(gray: Mat, image: ImageProxy, quadBuffer: FloatArray) {
+        val pts = quadBuffer
+        var cx = 0f
+        var cy = 0f
+        for (i in 0 until 4) {
+            cx += pts[i * 2]; cy += pts[i * 2 + 1]
+        }
+        cx /= 4f; cy /= 4f
+        val poly = Array(4) { i ->
+            Point(
+                (cx + (pts[i * 2] - cx) * 2.2f).toDouble(),
+                (cy + (pts[i * 2 + 1] - cy) * 2.2f).toDouble()
+            )
+        }
+        val roi = Mat.zeros(gray.size(), CvType.CV_8UC1)
+        val polyM = MatOfPoint(*poly)
+        Imgproc.fillConvexPoly(roi, polyM, Scalar(255.0))
+        polyM.release()
+        var mask = roi
+        val skin = try {
+            skinMask(image, cx, cy)
+        } catch (t: Throwable) {
+            null
+        }
+        if (skin != null) {
+            val combined = Mat()
+            Core.bitwise_and(skin, roi, combined)
+            skin.release()
+            if (Core.countNonZero(combined) > 1500) {
+                mask = combined
+                roi.release()
+            } else {
+                combined.release()
+            }
+        }
+        val detector = orb ?: ORB.create(700).also { orb = it }
+        val kps = MatOfKeyPoint()
+        val desc = Mat()
+        detector.detectAndCompute(gray, mask, kps, desc)
+        mask.release()
+        val arr = kps.toArray()
+        kps.release()
+        if (arr.size < 25 || desc.empty()) {
+            desc.release()
+            return
+        }
+        // In Referenz-Koordinaten umrechnen
+        val inv = Matrix()
+        if (!hCur.invert(inv)) {
+            desc.release()
+            return
+        }
+        val f = FloatArray(arr.size * 2)
+        for (i in arr.indices) {
+            f[i * 2] = arr[i].pt.x.toFloat()
+            f[i * 2 + 1] = arr[i].pt.y.toFloat()
+        }
+        inv.mapPoints(f)
+        keyPts = toPoints(f)
+        keyDesc = desc
+    }
+
+    /** Sucht die Merkmale des Referenzbildes im aktuellen Bild und schätzt Referenz -> jetzt. */
+    private fun relocalize(gray: Mat, image: ImageProxy, refQuad: FloatArray?, w: Double, h: Double): Matrix? {
+        val kd = keyDesc ?: return null
+        val detector = orb ?: ORB.create(700).also { orb = it }
+        val mask = try {
+            skinMaskAll(image)
+        } catch (t: Throwable) {
+            null
+        }
+        val kps = MatOfKeyPoint()
+        val desc = Mat()
+        detector.detectAndCompute(gray, mask ?: Mat(), kps, desc)
+        mask?.release()
+        val cur = kps.toArray()
+        kps.release()
+        if (cur.size < 15 || desc.empty()) {
+            desc.release()
+            return null
+        }
+        val m = matcher ?: DescriptorMatcher.create(DescriptorMatcher.BRUTEFORCE_HAMMING).also { matcher = it }
+        val knn = ArrayList<MatOfDMatch>()
+        m.knnMatch(kd, desc, knn, 2)
+        desc.release()
+        val src = ArrayList<Point>()
+        val dst = ArrayList<Point>()
+        for (mm in knn) {
+            val d = mm.toArray()
+            mm.release()
+            if (d.isEmpty()) continue
+            if (d.size >= 2 && d[0].distance > 0.8f * d[1].distance) continue
+            val qi = d[0].queryIdx
+            val ti = d[0].trainIdx
+            if (qi < 0 || qi >= keyPts.size || ti < 0 || ti >= cur.size) continue
+            src.add(keyPts[qi])
+            dst.add(cur[ti].pt)
+        }
+        if (src.size < 12) return null
+        val srcM = MatOfPoint2f(*src.toTypedArray())
+        val dstM = MatOfPoint2f(*dst.toTypedArray())
+        val inl = Mat()
+        val hom = Calib3d.findHomography(srcM, dstM, Calib3d.RANSAC, 4.0, inl)
+        srcM.release(); dstM.release()
+        if (hom.empty()) {
+            hom.release(); inl.release()
+            return null
+        }
+        val count = inliers(inl, src.size).count { it }
+        val res = toMatrix3(hom)
+        hom.release(); inl.release()
+        if (count < 12 || !quadOk(res, refQuad, w, h)) return null
+        return res
+    }
+
+    /** Alle Pixel in Hautfarbe (ohne Zusammenhangs-Bedingung), für das Wiederfinden. */
+    private fun skinMaskAll(image: ImageProxy): Mat? {
+        if (refCb < 0f) return null
+        val w = image.width
+        val h = image.height
+        val cw = w / 2
+        val ch = h / 2
+        if (cw < 4 || ch < 4) return null
+        if (cbBytes.size != cw * ch) {
+            cbBytes = ByteArray(cw * ch)
+            crBytes = ByteArray(cw * ch)
+        }
+        readChroma(image.planes[1], cw, ch, cbBytes)
+        readChroma(image.planes[2], cw, ch, crBytes)
+        val bin = ByteArray(cw * ch)
+        var n = 0
+        for (i in 0 until cw * ch) {
+            val dcb = (cbBytes[i].toInt() and 0xFF) - refCb
+            val dcr = (crBytes[i].toInt() and 0xFF) - refCr
+            if (dcb * dcb / (16f * 16f) + dcr * dcr / (14f * 14f) <= 1f) {
+                bin[i] = -1
+                n++
+            }
+        }
+        if (n < 200) return null
+        val small = Mat(ch, cw, CvType.CV_8UC1)
+        small.put(0, 0, bin)
+        val k5 = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0))
+        Imgproc.morphologyEx(small, small, Imgproc.MORPH_CLOSE, k5)
+        k5.release()
+        val full = Mat()
+        Imgproc.resize(small, full, Size(w.toDouble(), h.toDouble()), 0.0, 0.0, Imgproc.INTER_NEAREST)
+        small.release()
+        return full
     }
 
     /**
@@ -323,10 +557,8 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
     }
 
     /** Sucht zusätzliche gut verfolgbare Punkte auf der Körperstelle rund um das Tattoo. */
-    private fun seed(gray: Mat, v2b: Matrix, image: ImageProxy): List<Point> {
-        val quad = listener.currentQuad() ?: return emptyList()
-        val pts = quad.copyOf()
-        v2b.mapPoints(pts)
+    private fun seed(gray: Mat, quadBuffer: FloatArray, image: ImageProxy): List<Point> {
+        val pts = quadBuffer
         var cx = 0f
         var cy = 0f
         for (i in 0 until 4) {

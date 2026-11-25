@@ -245,7 +245,7 @@ class ArActivity : AppCompatActivity(), ArOverlayView.Listener, TattooTracker.Li
             stable ->
                 "✓ Verankert – das Tattoo folgt der Hautstelle."
             else ->
-                "Verankert – suche Halt im Bild … Kamera ruhig halten."
+                "Körperstelle kurz verloren – wird gesucht … Stelle wieder ins Bild bringen bzw. langsamer bewegen."
         }
     }
 
