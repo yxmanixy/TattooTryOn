@@ -245,7 +245,8 @@ class ArOverlayView @JvmOverloads constructor(
         cx /= 4f; cy /= 4f
         if (cx < -width || cx > 2f * width || cy < -height || cy > 2f * height) return
         // Leichte Glättung gegen Zittern
-        for (i in 0 until 8) quad[i] += (next[i] - quad[i]) * 0.75f
+        // Kaum Glättung, damit das Tattoo ohne Verzögerung folgt
+        for (i in 0 until 8) quad[i] += (next[i] - quad[i]) * 0.92f
         lastT.set(t)
         publish()
         invalidate()

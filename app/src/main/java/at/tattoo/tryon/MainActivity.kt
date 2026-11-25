@@ -147,6 +147,11 @@ class MainActivity : AppCompatActivity() {
             .show()
         val appCtx = applicationContext
         Executors.newSingleThreadExecutor().execute {
+            val bodySeg = try {
+                BodySegmenter(appCtx).takeIf { it.available }
+            } catch (t: Throwable) {
+                null
+            }
             var ok = 0
             uris.forEachIndexed { idx, uri ->
                 runOnUiThread {
@@ -156,7 +161,14 @@ class MainActivity : AppCompatActivity() {
                 try {
                     val bmp = ImageUtils.loadBitmap(appCtx, uri, 1600)
                     if (bmp != null) {
-                        val cut = Extractor.autoExtract(bmp)
+                        // KI-Körpermaske: Hintergrund und Kleidung werden nicht als Tattoo erkannt
+                        val seg = try {
+                            bodySeg?.segmentBitmap(bmp, 0)
+                        } catch (t: Throwable) {
+                            null
+                        }
+                        val hints = seg?.let { sg -> Extractor.AiHints(body = { x, y -> sg.skinAt(x, y) }) }
+                        val cut = Extractor.autoExtract(bmp, hints)
                         if (cut != null) {
                             TattooStore.save(appCtx, cut)
                             cut.recycle()
@@ -168,6 +180,7 @@ class MainActivity : AppCompatActivity() {
                     // Bild überspringen
                 }
             }
+            bodySeg?.close()
             runOnUiThread {
                 if (isDestroyed) return@runOnUiThread
                 dialog.dismiss()

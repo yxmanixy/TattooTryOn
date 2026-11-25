@@ -32,7 +32,17 @@ class BodySegmenter(context: Context) {
         val fromBuffer: Matrix,
         val bufferW: Int,
         val bufferH: Int
-    )
+    ) {
+        private val mv = FloatArray(9).also { fromBuffer.getValues(it) }
+
+        /** Ist an dieser Stelle (Puffer- bzw. Bildkoordinaten) Körperhaut? */
+        fun skinAt(bx: Float, by: Float): Boolean {
+            val x = (mv[0] * bx + mv[1] * by + mv[2]).toInt()
+            val y = (mv[3] * bx + mv[4] * by + mv[5]).toInt()
+            if (x < 0 || y < 0 || x >= w || y >= h) return false
+            return skin[y * w + x]
+        }
+    }
 
     private val segmenter: ImageSegmenter? = try {
         val options = ImageSegmenter.ImageSegmenterOptions.builder()
@@ -49,8 +59,15 @@ class BodySegmenter(context: Context) {
     val available: Boolean get() = segmenter != null
 
     fun segment(image: ImageProxy): Seg? {
-        val seg = segmenter ?: return null
         val full = image.toBitmap()
+        val r = segmentBitmap(full, image.imageInfo.rotationDegrees)
+        full.recycle()
+        return r
+    }
+
+    /** Segmentiert ein Bitmap. rotationDegrees dreht es vorher aufrecht (Kamera); bei Fotos 0. */
+    fun segmentBitmap(full: Bitmap, rotationDegrees: Int): Seg? {
+        val seg = segmenter ?: return null
         val bw = full.width
         val bh = full.height
         // Klein rechnen (das Modell arbeitet intern mit 256 x 256)
@@ -58,7 +75,7 @@ class BodySegmenter(context: Context) {
         val sw = max(8, (bw * scale).roundToInt())
         val sh = max(8, (bh * scale).roundToInt())
         // Aufrecht drehen, damit das Modell Menschen in normaler Lage sieht
-        val rot = image.imageInfo.rotationDegrees
+        val rot = rotationDegrees
         val m = Matrix()
         m.setScale(sw.toFloat() / bw, sh.toFloat() / bh)
         val uw: Int
@@ -79,7 +96,6 @@ class BodySegmenter(context: Context) {
         }
         val up = Bitmap.createBitmap(uw, uh, Bitmap.Config.ARGB_8888)
         Canvas(up).drawBitmap(full, m, Paint(Paint.FILTER_BITMAP_FLAG))
-        full.recycle()
 
         val result = seg.segment(BitmapImageBuilder(up).build())
         up.recycle()

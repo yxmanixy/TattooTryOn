@@ -39,6 +39,19 @@ class Extractor(src: Bitmap) {
 
     class KeyResult(val alpha: ByteArray, val nearest: ByteArray, val samples: IntArray, val localSkin: IntArray?)
 
+    /**
+     * KI-Hinweise für die Erkennung (Abfragen in Bildkoordinaten):
+     * body  = Körperhaut laut KI-Segmentierung (Hintergrund/Kleidung ausschließen)
+     * limit = angetipptes Objekt laut KI-Auswahl
+     * focus = angetippte Stelle (bevorzugter Tattoo-Bereich)
+     */
+    class AiHints(
+        val body: ((Float, Float) -> Boolean)? = null,
+        val limit: ((Float, Float) -> Boolean)? = null,
+        val focusX: Float = -1f,
+        val focusY: Float = -1f
+    )
+
     /** Ergebnis der automatischen Erkennung (volle Auflösung). */
     class AutoResult(val localSkin: IntArray, val region: ByteArray, val found: Boolean)
 
@@ -226,7 +239,7 @@ class Extractor(src: Bitmap) {
      * 2. "Tinte" = deutlich dunkler/farbiger als die lokale Haut
      * 3. Tinten-Pixel zu Clustern verbinden, den größten (mittigen) Cluster wählen, Löcher füllen
      */
-    fun autoDetect(): AutoResult {
+    fun autoDetect(hints: AiHints? = null): AutoResult {
         val scale = min(1f, 420f / max(w, h))
         val aw = max(8, (w * scale).roundToInt())
         val ah = max(8, (h * scale).roundToInt())
@@ -246,6 +259,47 @@ class Extractor(src: Bitmap) {
         val cg = IntArray(n) { (sp[it] shr 8) and 0xFF }
         val cb = IntArray(n) { sp[it] and 0xFF }
 
+        // ---------- KI-Bereiche auf Analyse-Auflösung ----------
+        val fx = w.toFloat() / aw
+        val fy = h.toFloat() / ah
+        val grow = max(2, (max(aw, ah) * 0.03f).toInt())
+        var bodyA: IntArray? = hints?.body?.let { f ->
+            IntArray(n) { if (f((it % aw + 0.5f) * fx, (it / aw + 0.5f) * fy)) 1 else 0 }
+        }
+        if (bodyA != null) {
+            if (bodyA.count { it == 1 } < n * 0.03f) {
+                bodyA = null // keine Person im Bild (z. B. Motiv auf Papier)
+            } else {
+                // Tattoo-Flächen liegen als "Löcher" in der Haut -> füllen, dann etwas vergrößern
+                fillHoles(bodyA, aw, ah)
+                bodyA = filter(bodyA, aw, ah, grow, true)
+            }
+        }
+        var limitA: IntArray? = hints?.limit?.let { f ->
+            IntArray(n) { if (f((it % aw + 0.5f) * fx, (it / aw + 0.5f) * fy)) 1 else 0 }
+        }
+        if (limitA != null) {
+            if (limitA.count { it == 1 } < 20) {
+                limitA = null
+            } else {
+                fillHoles(limitA, aw, ah)
+                limitA = filter(limitA, aw, ah, grow, true)
+            }
+        }
+        val bodyF: IntArray? = bodyA
+        val limitF: IntArray? = limitA
+        val allowed = BooleanArray(n)
+        for (i in 0 until n) {
+            allowed[i] = (bodyF == null || bodyF[i] == 1) && (limitF == null || limitF[i] == 1)
+        }
+        val focusIdx = if (hints != null && hints.focusX >= 0f && hints.focusY >= 0f) {
+            val ax = (hints.focusX / fx).toInt().coerceIn(0, aw - 1)
+            val ay = (hints.focusY / fy).toInt().coerceIn(0, ah - 1)
+            ay * aw + ax
+        } else {
+            -1
+        }
+
         val r = max(5, (max(aw, ah) * 0.06f).toInt())
         val skR = closing(cr, aw, ah, r)
         val skG = closing(cg, aw, ah, r)
@@ -263,7 +317,7 @@ class Extractor(src: Bitmap) {
             val gg = cg[i] / max(skG[i].toFloat(), 1f)
             val bb = cb[i] / max(skB[i].toFloat(), 1f)
             val v = 1f - min(min(min(rr, gg), bb), 1f)
-            if (v > 0.28f) {
+            if (v > 0.28f && allowed[i]) {
                 ink[i] = 1
                 inkCount++
             }
@@ -316,6 +370,13 @@ class Extractor(src: Bitmap) {
                 val my = sy.toFloat() / inkPixels
                 val dist = hypot(mx - cx0, my - cy0) / maxDist
                 var score = inkPixels * (1.25f - dist)
+                if (focusIdx >= 0) {
+                    // Angetippte Stelle: nächster Cluster gewinnt
+                    val fdx = mx - focusIdx % aw
+                    val fdy = my - focusIdx / aw
+                    val fd = hypot(fdx, fdy) / (max(aw, ah) * 0.1f)
+                    score = inkPixels / (1f + fd * fd)
+                }
                 var borders = 0
                 if (minX <= 1) borders++
                 if (minY <= 1) borders++
@@ -330,6 +391,9 @@ class Extractor(src: Bitmap) {
             label++
         }
 
+        // Liegt die angetippte Stelle direkt in einem Cluster, nimm genau diesen
+        if (focusIdx >= 0 && labels[focusIdx] >= 0) bestLabel = labels[focusIdx]
+
         val found = bestLabel >= 0 && inkCount > n / 500
         val region = IntArray(n)
         if (found) {
@@ -337,8 +401,9 @@ class Extractor(src: Bitmap) {
             fillHoles(region, aw, ah)
             val grown = filter(region, aw, ah, max(1, d / 2), true)
             System.arraycopy(grown, 0, region, 0, n)
+            for (i in 0 until n) if (!allowed[i]) region[i] = 0
         } else {
-            region.fill(1)
+            for (i in 0 until n) region[i] = if (allowed[i]) 1 else 0
         }
 
         // Auf volle Auflösung hochskalieren
@@ -634,9 +699,9 @@ class Extractor(src: Bitmap) {
          * Komplett automatisches Freistellen ohne Benutzeroberfläche (für den Mehrfach-Import).
          * Liefert ein zugeschnittenes Bitmap mit Transparenz oder null.
          */
-        fun autoExtract(src: Bitmap): Bitmap? {
+        fun autoExtract(src: Bitmap, hints: AiHints? = null): Bitmap? {
             val ex = Extractor(src)
-            val auto = ex.autoDetect()
+            val auto = ex.autoDetect(hints)
             ex.applyAuto(auto)
             ex.applyKey(ex.computeKey(ex.params()))
             ex.composeAll()

@@ -64,19 +64,26 @@
                 app:singleSelection="true">
 
                 <com.google.android.material.chip.Chip
-                    android:id="@+id/toolLasso"
+                    android:id="@+id/toolAi"
                     style="@style/Widget.Material3.Chip.Filter"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:checked="true"
-                    android:text="1 Umranden" />
+                    android:text="KI-Auswahl" />
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/toolLasso"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Umranden" />
 
                 <com.google.android.material.chip.Chip
                     android:id="@+id/toolSample"
                     style="@style/Widget.Material3.Chip.Filter"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="2 Haut antippen" />
+                    android:text="Haut antippen" />
 
                 <com.google.android.material.chip.Chip
                     android:id="@+id/toolErase"

@@ -22,11 +22,12 @@ class ExtractView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
 ) : View(context, attrs) {
 
-    enum class Tool { LASSO, SAMPLE, ERASE, RESTORE }
+    enum class Tool { AI, LASSO, SAMPLE, ERASE, RESTORE }
 
     interface Listener {
         fun onLassoFinished(path: Path)
         fun onSampleTap(x: Float, y: Float)
+        fun onAiTap(x: Float, y: Float)
         fun onStrokeStart()
         fun onBrush(x: Float, y: Float, radius: Float, erase: Boolean)
     }
@@ -226,7 +227,7 @@ class ExtractView @JvmOverloads constructor(
                                 dabLine(lastX, lastY, x, y)
                             }
                         }
-                        Tool.SAMPLE -> {}
+                        Tool.SAMPLE, Tool.AI -> {}
                     }
                     lastX = x
                     lastY = y
@@ -257,6 +258,12 @@ class ExtractView @JvmOverloads constructor(
                             if (!moved) {
                                 val p = toImage(e.x, e.y)
                                 listener?.onSampleTap(p[0], p[1])
+                            }
+                        }
+                        Tool.AI -> {
+                            if (!moved) {
+                                val p = toImage(e.x, e.y)
+                                listener?.onAiTap(p[0], p[1])
                             }
                         }
                         Tool.ERASE, Tool.RESTORE -> {

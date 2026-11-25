@@ -11,8 +11,8 @@ android {
         applicationId = "at.tattoo.tryon"
         minSdk = 29
         targetSdk = 34
-        versionCode = 7
-        versionName = "2.5"
+        versionCode = 8
+        versionName = "2.6"
 
         ndk {
             // Nur echte Smartphone-Prozessoren -> deutlich kleinere APK

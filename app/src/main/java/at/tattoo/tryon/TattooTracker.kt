@@ -111,10 +111,23 @@ class TattooTracker(context: Context, private val listener: Listener) : ImageAna
     private var lost = false
 
     // KI-Körpererkennung (MediaPipe). Hautfarbe dient nur als Notlösung ohne Modell.
-    private var segmenter: BodySegmenter? = null
-    private var segTried = false
-    private var seg: BodySegmenter.Seg? = null
-    private var segFrame = -1000
+    // Die KI läuft in einem eigenen Thread, damit das Tracking nicht ausgebremst wird.
+    private val segExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private var segmenter: BodySegmenter? = null // nur auf segExecutor benutzen
+
+    @Volatile
+    private var segState = 0 // 0 = unbekannt, 1 = verfügbar, -1 = kein Modell
+
+    @Volatile
+    private var segBusy = false
+
+    @Volatile
+    private var segLatest: BodySegmenter.Seg? = null
+
+    @Volatile
+    private var segVersion = 0
+    private var segRequestFrame = -1000
+    private var limbVersion = -1
 
     // Referenzbild (ORB-Merkmale) zum Wiederfinden und gegen Drift
     private var orb: ORB? = null
@@ -316,15 +329,19 @@ class TattooTracker(context: Context, private val listener: Listener) : ImageAna
 
         // ---------- 5. Körperform (Achse + Breite des Arms/Beins) aus der KI-Maske ----------
         val s = currentSeg(image)
-        if (s != null && segFrame == frameCount && curQuadB != null && !lost) {
-            val limb = try {
-                measureLimb(s, curQuadB, b2v)
-            } catch (t: Throwable) {
-                null
+        val sv = segVersion
+        if (sv != limbVersion) {
+            limbVersion = sv
+            if (s != null && curQuadB != null && !lost) {
+                val limb = try {
+                    measureLimb(s, curQuadB, b2v)
+                } catch (t: Throwable) {
+                    null
+                }
+                listener.onLimb(limb)
+            } else {
+                listener.onLimb(null)
             }
-            listener.onLimb(limb)
-        } else if (s == null && segFrame == frameCount) {
-            listener.onLimb(null)
         }
 
         // Referenzbild für das Wiederfinden anlegen (einmal pro Verankerung)
@@ -470,7 +487,7 @@ class TattooTracker(context: Context, private val listener: Listener) : ImageAna
             src.add(keyPts[qi])
             dst.add(cur[ti].pt)
         }
-        if (src.size < 12) return null
+        if (src.size < 15) return null
         val srcM = MatOfPoint2f(*src.toTypedArray())
         val dstM = MatOfPoint2f(*dst.toTypedArray())
         val inl = Mat()
@@ -483,37 +500,68 @@ class TattooTracker(context: Context, private val listener: Listener) : ImageAna
         val count = inliers(inl, src.size).count { it }
         val res = toMatrix3(hom)
         hom.release(); inl.release()
-        if (count < 12 || !quadOk(res, refQuad, w, h)) return null
+        // Strenger: genug und anteilig viele übereinstimmende Merkmale, sonst falscher Treffer
+        if (count < 15 || count < src.size * 0.3f || !quadOk(res, refQuad, w, h)) return null
         return res
     }
 
     // ---------- Körpermaske ----------
 
-    /** Liefert die (höchstens 3 Bilder alte) KI-Segmentierung oder null. */
+    /**
+     * Liefert die neueste KI-Segmentierung (oder null) und stößt bei Bedarf im Hintergrund
+     * eine neue an. Blockiert das Tracking nicht.
+     */
     private fun currentSeg(image: ImageProxy): BodySegmenter.Seg? {
-        if (!segTried) {
-            segTried = true
-            segmenter = try {
-                BodySegmenter(appContext)
+        if (segState >= 0 && !segBusy && frameCount - segRequestFrame >= 4) {
+            segRequestFrame = frameCount
+            segBusy = true
+            val bmp = try {
+                image.toBitmap()
             } catch (t: Throwable) {
                 null
             }
-        }
-        val sg = segmenter ?: return null
-        if (!sg.available) return null
-        val old = seg
-        if (old == null || frameCount - segFrame >= 3 || old.bufferW != image.width || old.bufferH != image.height) {
-            seg = try {
-                sg.segment(image)
-            } catch (t: Throwable) {
-                null
+            val rot = image.imageInfo.rotationDegrees
+            if (bmp == null) {
+                segBusy = false
+            } else {
+                try {
+                    segExecutor.execute {
+                        try {
+                            if (segState == 0) {
+                                segmenter = try {
+                                    BodySegmenter(appContext)
+                                } catch (t: Throwable) {
+                                    null
+                                }
+                                segState = if (segmenter?.available == true) 1 else -1
+                            }
+                            val sg = segmenter
+                            if (sg != null && segState == 1) {
+                                val r = sg.segmentBitmap(bmp, rot)
+                                if (r != null) {
+                                    segLatest = r
+                                    segVersion++
+                                }
+                            }
+                        } catch (t: Throwable) {
+                        } finally {
+                            bmp.recycle()
+                            segBusy = false
+                        }
+                    }
+                } catch (e: Exception) {
+                    bmp.recycle()
+                    segBusy = false
+                }
             }
-            segFrame = frameCount
         }
-        return seg
+        val latest = segLatest ?: return null
+        if (latest.bufferW != image.width || latest.bufferH != image.height) return null
+        return latest
     }
 
-    private fun segAvailable(): Boolean = segmenter?.available == true
+    /** true, solange das Modell nicht nachweislich fehlt (dann keine Hautfarben-Suche). */
+    private fun segAvailable(): Boolean = segState >= 0
 
     /** Zusammenhängender Hautbereich (KI-Maske) an der Stelle (mx, my) in Masken-Koordinaten. */
     private fun componentAt(s: BodySegmenter.Seg, mx: Float, my: Float): BooleanArray? {
@@ -975,8 +1023,14 @@ class TattooTracker(context: Context, private val listener: Listener) : ImageAna
 
     /** Gibt das KI-Modell frei (auf dem Analyse-Thread aufrufen). */
     fun close() {
-        segmenter?.close()
-        segmenter = null
+        try {
+            segExecutor.execute {
+                segmenter?.close()
+                segmenter = null
+            }
+        } catch (e: Exception) {
+        }
+        segExecutor.shutdown()
     }
 
     private fun releaseState() {

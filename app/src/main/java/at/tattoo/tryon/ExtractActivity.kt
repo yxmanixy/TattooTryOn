@@ -65,7 +65,8 @@ class ExtractActivity : AppCompatActivity(), ExtractView.Listener {
                 R.id.toolSample -> ExtractView.Tool.SAMPLE
                 R.id.toolErase -> ExtractView.Tool.ERASE
                 R.id.toolRestore -> ExtractView.Tool.RESTORE
-                else -> ExtractView.Tool.LASSO
+                R.id.toolLasso -> ExtractView.Tool.LASSO
+                else -> ExtractView.Tool.AI
             }
             updateHint()
         }
@@ -147,7 +148,7 @@ class ExtractActivity : AppCompatActivity(), ExtractView.Listener {
                 ex.softness = sliderSoft.value
                 extractor = ex
                 extractView.setImages(ex.original, ex.result)
-                findViewById<Chip>(R.id.toolErase).isChecked = true
+                findViewById<Chip>(R.id.toolAi).isChecked = true
                 updateHint()
                 invalidateOptionsMenu()
                 runAutoDetect()
@@ -155,14 +156,67 @@ class ExtractActivity : AppCompatActivity(), ExtractView.Listener {
         }
     }
 
-    /** Erkennt das Tattoo automatisch und stellt es frei. */
+    // KI-Modelle (werden im Hintergrund-Thread angelegt und benutzt)
+    private var bodySeg: BodySegmenter? = null
+    private var selector: TattooSelector? = null
+    private var aiTried = false
+
+    /** Nur auf dem worker-Thread aufrufen. */
+    private fun ensureAi() {
+        if (aiTried) return
+        aiTried = true
+        bodySeg = try {
+            BodySegmenter(applicationContext).takeIf { it.available }
+        } catch (t: Throwable) {
+            null
+        }
+        selector = try {
+            TattooSelector(applicationContext).takeIf { it.available }
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    /** KI-Körpermaske des Bildes als Abfrage-Funktion (worker-Thread). */
+    private fun bodyHint(ex: Extractor): ((Float, Float) -> Boolean)? {
+        ensureAi()
+        val seg = try {
+            bodySeg?.segmentBitmap(ex.original, 0)
+        } catch (t: Throwable) {
+            null
+        } ?: return null
+        return { x, y -> seg.skinAt(x, y) }
+    }
+
+    /** Erkennt das Tattoo automatisch (KI-Körpermaske + Tinten-Erkennung) und stellt es frei. */
     private fun runAutoDetect() {
+        runDetect(null, null)
+    }
+
+    /**
+     * Gemeinsame Erkennung. Mit tapX/tapY: KI-Auswahl des angetippten Objekts und
+     * Bevorzugung des Tattoos an dieser Stelle.
+     */
+    private fun runDetect(tapX: Float?, tapY: Float?) {
         val ex = extractor ?: return
+        if (busy) return
         setBusy(true)
-        hint.text = "Tattoo wird automatisch erkannt …"
+        hint.text = if (tapX == null) "KI sucht das Tattoo …" else "KI wählt das angetippte Tattoo aus …"
         worker.execute {
+            var usedAi = false
             val auto = try {
-                ex.autoDetect()
+                val body = if (ex.hasTransparency) null else bodyHint(ex)
+                val limit = if (tapX != null && tapY != null && !ex.hasTransparency) {
+                    try {
+                        selector?.select(ex.original, tapX, tapY)
+                    } catch (t: Throwable) {
+                        null
+                    }
+                } else {
+                    null
+                }
+                usedAi = body != null || limit != null
+                ex.autoDetect(Extractor.AiHints(body, limit, tapX ?: -1f, tapY ?: -1f))
             } catch (e: Throwable) {
                 null
             }
@@ -170,7 +224,7 @@ class ExtractActivity : AppCompatActivity(), ExtractView.Listener {
                 setBusy(false)
                 if (isDestroyed || extractor !== ex) return@post
                 if (auto == null) {
-                    Toast.makeText(this, "Automatische Erkennung fehlgeschlagen – bitte manuell umranden.", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, "Erkennung fehlgeschlagen – bitte manuell umranden.", Toast.LENGTH_LONG).show()
                     findViewById<Chip>(R.id.toolLasso).isChecked = true
                     updateHint()
                     return@post
@@ -181,13 +235,18 @@ class ExtractActivity : AppCompatActivity(), ExtractView.Listener {
                 scheduleKey(0)
                 val msg = when {
                     ex.hasTransparency -> "Bild ist bereits freigestellt."
-                    auto.found -> "Tattoo erkannt. Mit Toleranz, Radieren oder Umranden verfeinern."
-                    else -> "Kein eindeutiges Tattoo gefunden – bitte mit „Umranden“ markieren."
+                    auto.found && usedAi -> "Tattoo per KI erkannt. Falls falsch: auf das richtige Tattoo tippen."
+                    auto.found -> "Tattoo erkannt (ohne KI-Modell). Mit den Werkzeugen verfeinern."
+                    else -> "Kein eindeutiges Tattoo gefunden – auf das Tattoo tippen oder „Umranden“ nutzen."
                 }
                 Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                 updateHint()
             }
         }
+    }
+
+    override fun onAiTap(x: Float, y: Float) {
+        runDetect(x, y)
     }
 
     private fun setBusy(b: Boolean) {
@@ -220,6 +279,8 @@ class ExtractActivity : AppCompatActivity(), ExtractView.Listener {
         val ex = extractor
         hint.text = when {
             ex == null -> "Bild wird geladen …"
+            extractView.tool == ExtractView.Tool.AI ->
+                "KI-Auswahl: Tippe auf das Tattoo – die KI wählt es aus und stellt es frei. Zwei Finger = zoomen."
             extractView.tool == ExtractView.Tool.LASSO ->
                 "Umranden: Fahre einmal rund um das Tattoo, falls die automatische Erkennung danebenliegt. Zwei Finger = zoomen."
             extractView.tool == ExtractView.Tool.SAMPLE ->
@@ -383,6 +444,10 @@ class ExtractActivity : AppCompatActivity(), ExtractView.Listener {
     override fun onDestroy() {
         super.onDestroy()
         main.removeCallbacksAndMessages(null)
+        worker.execute {
+            bodySeg?.close()
+            selector?.close()
+        }
         worker.shutdown()
     }
 }
