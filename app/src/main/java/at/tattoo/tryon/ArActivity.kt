@@ -43,6 +43,7 @@ class ArActivity : AppCompatActivity(), ArOverlayView.Listener, TattooTracker.Li
     private var tattooPath: String? = null
     private var trackingAvailable = false
     private var stable = false
+    private var limbFound = false
     private var trackGen = -1
 
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
@@ -92,8 +93,8 @@ class ArActivity : AppCompatActivity(), ArOverlayView.Listener, TattooTracker.Li
             TattooPicker.show(this) { loadTattoo(it.absolutePath) }
         }
         findViewById<Slider>(R.id.sliderOpacity).addOnChangeListener { _, value, _ -> overlay.opacity = value }
-        findViewById<Slider>(R.id.sliderCurve).addOnChangeListener { _, value, fromUser ->
-            if (fromUser) overlay.setCurvature(value)
+        findViewById<Slider>(R.id.sliderCurve).addOnChangeListener { _, value, _ ->
+            overlay.shapeStrength = value
         }
 
         useFront = savedInstanceState?.getBoolean(STATE_FRONT) ?: false
@@ -143,7 +144,7 @@ class ArActivity : AppCompatActivity(), ArOverlayView.Listener, TattooTracker.Li
             )
             .build()
         if (trackingAvailable) {
-            val t = TattooTracker(this)
+            val t = TattooTracker(this, this)
             tracker = t
             c.setImageAnalysisAnalyzer(analysisExecutor, t)
         }
@@ -172,6 +173,8 @@ class ArActivity : AppCompatActivity(), ArOverlayView.Listener, TattooTracker.Li
         if (overlay.frozenFrame != null) unfreeze()
         tracker?.active = false
         overlay.setTrackedPoints(null)
+        overlay.clearLimb()
+        limbFound = false
         overlay.release()
         updateStatus()
     }
@@ -242,8 +245,10 @@ class ArActivity : AppCompatActivity(), ArOverlayView.Listener, TattooTracker.Li
                 "Tippe auf die Stelle am Körper, an der das Tattoo sitzen soll. Zwei Finger: drehen/skalieren."
             !trackingAvailable ->
                 "Platziert (ohne Tracking)."
+            stable && limbFound ->
+                "✓ Verankert – Körperform erkannt, das Tattoo folgt der Hautstelle."
             stable ->
-                "✓ Verankert – das Tattoo folgt der Hautstelle."
+                "✓ Verankert – das Tattoo folgt der Hautstelle (Körperform wird gesucht …)."
             else ->
                 "Körperstelle kurz verloren – wird gesucht … Stelle wieder ins Bild bringen bzw. langsamer bewegen."
         }
@@ -284,11 +289,28 @@ class ArActivity : AppCompatActivity(), ArOverlayView.Listener, TattooTracker.Li
         runOnUiThread { overlay.setTrackedPoints(points) }
     }
 
+    override fun onLimb(limb: FloatArray?) {
+        runOnUiThread {
+            overlay.setLimb(limb)
+            val found = overlay.hasLimb
+            if (found != limbFound) {
+                limbFound = found
+                updateStatus()
+            }
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         tracker?.active = false
         controller?.clearImageAnalysisAnalyzer()
         worker.shutdown()
+        val t = tracker
+        // KI-Modell auf dem Analyse-Thread freigeben, damit kein Bild mehr darauf zugreift
+        try {
+            analysisExecutor.execute { t?.close() }
+        } catch (e: Exception) {
+        }
         analysisExecutor.shutdown()
     }
 

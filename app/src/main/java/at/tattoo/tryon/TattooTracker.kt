@@ -1,5 +1,6 @@
 package at.tattoo.tryon
 
+import android.content.Context
 import android.graphics.Matrix
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -23,6 +24,9 @@ import org.opencv.imgproc.CLAHE
 import org.opencv.imgproc.Imgproc
 import org.opencv.video.Video
 import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -36,7 +40,9 @@ import kotlin.math.min
  * neu geschätzt. Dreht sich der Körper zurück, kehrt auch das Tattoo exakt in seine
  * Ausgangsform zurück.
  */
-class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
+class TattooTracker(context: Context, private val listener: Listener) : ImageAnalysis.Analyzer {
+
+    private val appContext: Context = context.applicationContext
 
     interface Listener {
         /** Abbildung Referenz-View-Koordinaten -> aktuelle View-Koordinaten. Analyse-Thread! */
@@ -53,6 +59,12 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
 
         /** Aktuell verfolgte Punkte (View-Koordinaten, x/y abwechselnd). Analyse-Thread! */
         fun onPoints(points: FloatArray) {}
+
+        /**
+         * Erkannte Körperform an der Tattoo-Stelle (View-Koordinaten):
+         * [Achsenpunkt x, y, Achsrichtung x, y, Querrichtung x, y, halbe Breite] oder null. Analyse-Thread!
+         */
+        fun onLimb(limb: FloatArray?) {}
     }
 
     @Volatile
@@ -97,6 +109,12 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
 
     /** true = Körperstelle verloren, es wird nur noch über das Referenzbild gesucht. */
     private var lost = false
+
+    // KI-Körpererkennung (MediaPipe). Hautfarbe dient nur als Notlösung ohne Modell.
+    private var segmenter: BodySegmenter? = null
+    private var segTried = false
+    private var seg: BodySegmenter.Seg? = null
+    private var segFrame = -1000
 
     // Referenzbild (ORB-Merkmale) zum Wiederfinden und gegen Drift
     private var orb: ORB? = null
@@ -296,6 +314,19 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
             }
         }
 
+        // ---------- 5. Körperform (Achse + Breite des Arms/Beins) aus der KI-Maske ----------
+        val s = currentSeg(image)
+        if (s != null && segFrame == frameCount && curQuadB != null && !lost) {
+            val limb = try {
+                measureLimb(s, curQuadB, b2v)
+            } catch (t: Throwable) {
+                null
+            }
+            listener.onLimb(limb)
+        } else if (s == null && segFrame == frameCount) {
+            listener.onLimb(null)
+        }
+
         // Referenzbild für das Wiederfinden anlegen (einmal pro Verankerung)
         if (keyDesc == null && (okThisFrame || justStarted) && !lost && curQuadB != null) {
             buildKeyframe(gray, image, curQuadB)
@@ -456,8 +487,218 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
         return res
     }
 
-    /** Alle Pixel in Hautfarbe (ohne Zusammenhangs-Bedingung), für das Wiederfinden. */
+    // ---------- Körpermaske ----------
+
+    /** Liefert die (höchstens 3 Bilder alte) KI-Segmentierung oder null. */
+    private fun currentSeg(image: ImageProxy): BodySegmenter.Seg? {
+        if (!segTried) {
+            segTried = true
+            segmenter = try {
+                BodySegmenter(appContext)
+            } catch (t: Throwable) {
+                null
+            }
+        }
+        val sg = segmenter ?: return null
+        if (!sg.available) return null
+        val old = seg
+        if (old == null || frameCount - segFrame >= 3 || old.bufferW != image.width || old.bufferH != image.height) {
+            seg = try {
+                sg.segment(image)
+            } catch (t: Throwable) {
+                null
+            }
+            segFrame = frameCount
+        }
+        return seg
+    }
+
+    private fun segAvailable(): Boolean = segmenter?.available == true
+
+    /** Zusammenhängender Hautbereich (KI-Maske) an der Stelle (mx, my) in Masken-Koordinaten. */
+    private fun componentAt(s: BodySegmenter.Seg, mx: Float, my: Float): BooleanArray? {
+        val w = s.w
+        val h = s.h
+        val cx = mx.toInt()
+        val cy = my.toInt()
+        if (cx < -w / 4 || cy < -h / 4 || cx > w + w / 4 || cy > h + h / 4) return null
+        // Nächstgelegenen Hautpixel suchen (Tippfehler / grobe Maske)
+        var start = -1
+        var best = Int.MAX_VALUE
+        val r = 10
+        for (y in max(0, cy - r)..min(h - 1, cy + r)) {
+            for (x in max(0, cx - r)..min(w - 1, cx + r)) {
+                if (!s.skin[y * w + x]) continue
+                val d = (x - cx) * (x - cx) + (y - cy) * (y - cy)
+                if (d < best) {
+                    best = d
+                    start = y * w + x
+                }
+            }
+        }
+        if (start < 0) return null
+        val comp = BooleanArray(w * h)
+        val queue = IntArray(w * h)
+        var head = 0
+        var tail = 0
+        queue[tail++] = start
+        comp[start] = true
+        while (head < tail) {
+            val i = queue[head++]
+            val x = i % w
+            val y = i / w
+            if (x > 0 && s.skin[i - 1] && !comp[i - 1]) { comp[i - 1] = true; queue[tail++] = i - 1 }
+            if (x < w - 1 && s.skin[i + 1] && !comp[i + 1]) { comp[i + 1] = true; queue[tail++] = i + 1 }
+            if (y > 0 && s.skin[i - w] && !comp[i - w]) { comp[i - w] = true; queue[tail++] = i - w }
+            if (y < h - 1 && s.skin[i + w] && !comp[i + w]) { comp[i + w] = true; queue[tail++] = i + w }
+        }
+        return if (tail < 40) null else comp
+    }
+
+    /** Masken-Array (KI-Auflösung) -> Mat in Kamerapuffer-Auflösung (255 = Haut), Rand leicht abgetragen. */
+    private fun toBufferMat(mask: BooleanArray, s: BodySegmenter.Seg): Mat {
+        val bytes = ByteArray(s.w * s.h) { if (mask[it]) -1 else 0 }
+        val small = Mat(s.h, s.w, CvType.CV_8UC1)
+        small.put(0, 0, bytes)
+        val v = FloatArray(9)
+        s.toBuffer.getValues(v)
+        val aff = Mat(2, 3, CvType.CV_64F)
+        aff.put(0, 0, v[0].toDouble(), v[1].toDouble(), v[2].toDouble(), v[3].toDouble(), v[4].toDouble(), v[5].toDouble())
+        val full = Mat()
+        Imgproc.warpAffine(small, full, aff, Size(s.bufferW.toDouble(), s.bufferH.toDouble()), Imgproc.INTER_NEAREST)
+        small.release(); aff.release()
+        val k = max(3, (s.bufferW.toFloat() / s.w * 1.5f).toInt()) or 1
+        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(k.toDouble(), k.toDouble()))
+        Imgproc.erode(full, full, kernel)
+        kernel.release()
+        return full
+    }
+
+    /** Hautbereich an der Tattoo-Stelle (Puffer-Koordinaten), für das Setzen neuer Punkte. */
+    private fun skinMask(image: ImageProxy, cx: Float, cy: Float): Mat? {
+        val s = currentSeg(image)
+        if (s != null) {
+            val p = floatArrayOf(cx, cy)
+            s.fromBuffer.mapPoints(p)
+            val comp = componentAt(s, p[0], p[1]) ?: return null
+            return toBufferMat(comp, s)
+        }
+        // Modell vorhanden, aber dort keine Haut erkannt -> KEINE Hautfarben-Suche (Holzboden!)
+        if (segAvailable()) return null
+        return chromaMask(image, cx, cy)
+    }
+
+    /** Alle Hautbereiche im Bild (Puffer-Koordinaten), für das Wiederfinden. */
     private fun skinMaskAll(image: ImageProxy): Mat? {
+        val s = currentSeg(image)
+        if (s != null) {
+            if (s.skin.count { it } < 50) return null
+            return toBufferMat(s.skin, s)
+        }
+        if (segAvailable()) return null
+        return chromaMaskAll(image)
+    }
+
+    /**
+     * Misst die Körperstelle unter dem Tattoo: Hauptachse (Richtung von Arm/Bein) aus den
+     * Momenten des Hautbereichs und die Breite quer dazu (mehrere Querschnitte gemittelt).
+     */
+    private fun measureLimb(s: BodySegmenter.Seg, quadB: FloatArray, b2v: Matrix): FloatArray? {
+        val q = quadB.copyOf()
+        s.fromBuffer.mapPoints(q)
+        var cx = 0f
+        var cy = 0f
+        for (i in 0 until 4) {
+            cx += q[i * 2]; cy += q[i * 2 + 1]
+        }
+        cx /= 4f; cy /= 4f
+        var size = 0f
+        for (i in 0 until 4) size = max(size, hypot(q[i * 2] - cx, q[i * 2 + 1] - cy))
+        val comp = componentAt(s, cx, cy) ?: return null
+        val w = s.w
+        val h = s.h
+        val r = (size * 1.8f).coerceIn(8f, max(w, h).toFloat())
+        var n = 0
+        var sx = 0.0
+        var sy = 0.0
+        var sxx = 0.0
+        var syy = 0.0
+        var sxy = 0.0
+        val r2 = r * r
+        for (y in max(0, (cy - r).toInt())..min(h - 1, (cy + r).toInt())) {
+            for (x in max(0, (cx - r).toInt())..min(w - 1, (cx + r).toInt())) {
+                if (!comp[y * w + x]) continue
+                val dx = x - cx
+                val dy = y - cy
+                if (dx * dx + dy * dy > r2) continue
+                n++
+                sx += x; sy += y
+                sxx += x.toDouble() * x; syy += y.toDouble() * y; sxy += x.toDouble() * y
+            }
+        }
+        if (n < 40) return null
+        val mx = sx / n
+        val my = sy / n
+        val cxx = sxx / n - mx * mx
+        val cyy = syy / n - my * my
+        val cxy = sxy / n - mx * my
+        val theta = 0.5 * atan2(2 * cxy, cxx - cyy)
+        val dx = cos(theta).toFloat()
+        val dy = sin(theta).toFloat()
+        val nx = -dy
+        val ny = dx
+
+        var sumMid = 0f
+        var sumHalf = 0f
+        var cnt = 0
+        for (k in -2..2) {
+            val bx = cx + dx * k * size * 0.3f
+            val by = cy + dy * k * size * 0.3f
+            val a = walk(comp, w, h, bx, by, nx, ny)
+            val b = walk(comp, w, h, bx, by, -nx, -ny)
+            if (a < 0f && b < 0f) continue
+            val t1 = if (a < 0f) b else a
+            val t2 = if (b < 0f) a else b
+            if (t1 + t2 < 2f) continue
+            sumMid += (t1 - t2) / 2f
+            sumHalf += (t1 + t2) / 2f
+            cnt++
+        }
+        if (cnt == 0) return null
+        val mid = sumMid / cnt
+        val half = sumHalf / cnt
+        if (half < 3f) return null
+        val ax = cx + nx * mid
+        val ay = cy + ny * mid
+        val pts = floatArrayOf(ax, ay, ax + dx * half, ay + dy * half, ax + nx * half, ay + ny * half)
+        s.toBuffer.mapPoints(pts)
+        b2v.mapPoints(pts)
+        val vdx = pts[2] - pts[0]
+        val vdy = pts[3] - pts[1]
+        val ld = hypot(vdx, vdy)
+        val vnx = pts[4] - pts[0]
+        val vny = pts[5] - pts[1]
+        val ln = hypot(vnx, vny)
+        if (ld < 1e-3f || ln < 2f) return null
+        return floatArrayOf(pts[0], pts[1], vdx / ld, vdy / ld, vnx / ln, vny / ln, ln)
+    }
+
+    /** Abstand bis zum Rand des Hautbereichs in Richtung (dx, dy); -1 = Bildrand erreicht (Rand unbekannt). */
+    private fun walk(comp: BooleanArray, w: Int, h: Int, x0: Float, y0: Float, dx: Float, dy: Float): Float {
+        var t = 0f
+        val maxT = (w + h).toFloat()
+        while (t < maxT) {
+            val x = (x0 + dx * t).toInt()
+            val y = (y0 + dy * t).toInt()
+            if (x < 0 || y < 0 || x >= w || y >= h) return -1f
+            if (!comp[y * w + x]) return t
+            t += 0.5f
+        }
+        return -1f
+    }
+
+    /** Notlösung ohne KI-Modell: alle Pixel in Hautfarbe, für das Wiederfinden. */
+    private fun chromaMaskAll(image: ImageProxy): Mat? {
         if (refCb < 0f) return null
         val w = image.width
         val h = image.height
@@ -607,10 +848,10 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
     }
 
     /**
-     * Maske der Körperstelle: Pixel mit ähnlicher Hautfarbe (Cb/Cr) wie an der angetippten Stelle,
+     * Notlösung ohne KI-Modell: Pixel mit ähnlicher Hautfarbe (Cb/Cr) wie an der angetippten Stelle,
      * zusammenhängend mit dieser Stelle. Volle Puffer-Auflösung, 255 = Haut.
      */
-    private fun skinMask(image: ImageProxy, cx: Float, cy: Float): Mat? {
+    private fun chromaMask(image: ImageProxy, cx: Float, cy: Float): Mat? {
         val w = image.width
         val h = image.height
         val cw = w / 2
@@ -730,6 +971,12 @@ class TattooTracker(private val listener: Listener) : ImageAnalysis.Analyzer {
         for (r in 0 until 2) for (c in 0 until 3) v[r * 3 + c] = aff.get(r, c)[0].toFloat()
         v[6] = 0f; v[7] = 0f; v[8] = 1f
         return Matrix().apply { setValues(v) }
+    }
+
+    /** Gibt das KI-Modell frei (auf dem Analyse-Thread aufrufen). */
+    fun close() {
+        segmenter?.close()
+        segmenter = null
     }
 
     private fun releaseState() {

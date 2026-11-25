@@ -50,6 +50,17 @@ android {
         jvmTarget = "17"
     }
 
+    // Das KI-Modell muss unkomprimiert in der APK liegen
+    androidResources {
+        noCompress += "tflite"
+    }
+
+    packaging {
+        jniLibs {
+            pickFirsts += "**/libc++_shared.so"
+        }
+    }
+
     lint {
         abortOnError = false
         checkReleaseBuilds = false
@@ -72,4 +83,7 @@ dependencies {
 
     // Bild-Tracking für die AR-Ansicht (Optical Flow, Homographie)
     implementation("org.opencv:opencv:4.10.0")
+
+    // KI-Körpererkennung (Segmentierung: Haut / Kleidung / Hintergrund), läuft offline
+    implementation("com.google.mediapipe:tasks-vision:0.10.14")
 }

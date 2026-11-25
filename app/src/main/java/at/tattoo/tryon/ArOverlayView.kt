@@ -16,12 +16,9 @@ import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
-import java.util.concurrent.Executors
 import kotlin.math.abs
-import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
-import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -46,7 +43,6 @@ class ArOverlayView @JvmOverloads constructor(
     var listener: Listener? = null
 
     private var tattoo: Bitmap? = null
-    private var warped: Bitmap? = null
 
     /** Ecken TL, TR, BR, BL in View-Koordinaten. */
     private val quad = FloatArray(8)
@@ -67,8 +63,6 @@ class ArOverlayView @JvmOverloads constructor(
             invalidate()
         }
 
-    var curvature = 0.45f
-        private set
 
     /** Zum Prüfen: verfolgte Punkte anzeigen. */
     var showPoints = false
@@ -78,6 +72,15 @@ class ArOverlayView @JvmOverloads constructor(
         }
     private var trackedPoints: FloatArray? = null
     private val pointPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF39FF88.toInt() }
+    private val axisPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFFFD54F.toInt()
+        strokeWidth = 2f * resources.displayMetrics.density
+    }
+    private val edgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xAAFFD54F.toInt()
+        strokeWidth = 1.5f * resources.displayMetrics.density
+        pathEffect = DashPathEffect(floatArrayOf(12f, 8f), 0f)
+    }
 
     fun setTrackedPoints(p: FloatArray?) {
         trackedPoints = p
@@ -87,8 +90,8 @@ class ArOverlayView @JvmOverloads constructor(
     private val density = resources.displayMetrics.density
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
     private val main = Handler(Looper.getMainLooper())
-    private val warpExecutor = Executors.newSingleThreadExecutor()
-    private var warpVersion = 0
+    private var meshVerts = FloatArray(0)
+    private var meshColors = IntArray(0)
 
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private val framePaint = Paint(Paint.FILTER_BITMAP_FLAG)
@@ -118,35 +121,57 @@ class ArOverlayView @JvmOverloads constructor(
         } else {
             bmp
         }
-        warped = null
         quadValid = false
         anchored = false
-        rebuildWarp()
         invalidate()
     }
 
-    fun setCurvature(c: Float) {
-        curvature = c
-        rebuildWarp()
+    /** Stärke der automatischen Körperform-Anpassung (0 = flach). */
+    var shapeStrength = 1f
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    /** Geglättete Körperform [ax, ay, dx, dy, nx, ny, halbe Breite] in View-Koordinaten. */
+    private var limb: FloatArray? = null
+    private var limbMisses = 0
+
+    val hasLimb: Boolean get() = limb != null
+
+    /** Neue Messung der Körperform vom Tracker (UI-Thread). */
+    fun setLimb(l: FloatArray?) {
+        if (l == null) {
+            limbMisses++
+            if (limbMisses > 6) limb = null
+            invalidate()
+            return
+        }
+        limbMisses = 0
+        val cur = limb
+        if (cur == null) {
+            limb = l.copyOf()
+        } else {
+            // Richtung ggf. umdrehen, damit nicht zwischen +/- gesprungen wird
+            if (cur[2] * l[2] + cur[3] * l[3] < 0f) {
+                l[2] = -l[2]; l[3] = -l[3]
+            }
+            if (cur[4] * l[4] + cur[5] * l[5] < 0f) {
+                l[4] = -l[4]; l[5] = -l[5]
+            }
+            for (i in 0 until 7) cur[i] += (l[i] - cur[i]) * 0.35f
+            val ld = hypot(cur[2], cur[3]).coerceAtLeast(1e-4f)
+            cur[2] /= ld; cur[3] /= ld
+            val ln = hypot(cur[4], cur[5]).coerceAtLeast(1e-4f)
+            cur[4] /= ln; cur[5] /= ln
+        }
+        invalidate()
     }
 
-    private fun rebuildWarp() {
-        val t = tattoo ?: return
-        val c = curvature
-        val version = ++warpVersion
-        warpExecutor.execute {
-            val w = try {
-                warpCylinder(t, c)
-            } catch (e: Throwable) {
-                t
-            }
-            main.post {
-                if (version == warpVersion) {
-                    warped = w
-                    invalidate()
-                }
-            }
-        }
+    fun clearLimb() {
+        limb = null
+        limbMisses = 0
+        invalidate()
     }
 
     // ---------- Viereck ----------
@@ -246,9 +271,13 @@ class ArOverlayView @JvmOverloads constructor(
 
     // ---------- Zeichnen ----------
 
-    /** Zeichnet das Tattoo auf einen Canvas (auch für das Speichern). */
+    /**
+     * Zeichnet das Tattoo auf einen Canvas (auch für das Speichern).
+     * Das perspektivische Viereck wird zusätzlich um die erkannte Körperform (Zylinder entlang
+     * der Arm-/Beinachse) gelegt: zur Körperkante hin gestaucht und ausgeblendet.
+     */
     fun drawTattoo(canvas: Canvas, multiply: Boolean) {
-        val bmp = warped ?: tattoo ?: return
+        val bmp = tattoo ?: return
         ensureQuad()
         if (!quadValid) return
         val src = floatArrayOf(
@@ -260,7 +289,78 @@ class ArOverlayView @JvmOverloads constructor(
         if (!drawMatrix.setPolyToPoly(src, 0, quad, 0, 4)) return
         paint.alpha = (opacity * 255).toInt().coerceIn(0, 255)
         paint.blendMode = if (multiply) BlendMode.MULTIPLY else null
-        canvas.drawBitmap(bmp, drawMatrix, paint)
+
+        val k = shapeStrength
+        val shape = shapeFrame()
+        if (k <= 0.01f || shape == null) {
+            canvas.drawBitmap(bmp, drawMatrix, paint)
+            return
+        }
+        val ax = shape[0]
+        val ay = shape[1]
+        val nx = shape[4]
+        val ny = shape[5]
+        val half = shape[6]
+
+        val m = MESH
+        val count = (m + 1) * (m + 1)
+        if (meshVerts.size != count * 2) {
+            meshVerts = FloatArray(count * 2)
+            meshColors = IntArray(count)
+        }
+        var idx = 0
+        for (j in 0..m) {
+            for (i in 0..m) {
+                meshVerts[idx * 2] = bmp.width * i / m.toFloat()
+                meshVerts[idx * 2 + 1] = bmp.height * j / m.toFloat()
+                idx++
+            }
+        }
+        drawMatrix.mapPoints(meshVerts)
+        val maxPhi = 1.45f
+        val shiftK = min(k, 1f)
+        val curveK = min(1.5f, max(1f, k))
+        for (v in 0 until count) {
+            val px = meshVerts[v * 2]
+            val py = meshVerts[v * 2 + 1]
+            // Abstand quer zur Achse = Bogenlänge auf dem Zylinder
+            val sDist = (px - ax) * nx + (py - ay) * ny
+            var phi = sDist / half * curveK
+            val outside = abs(phi) > maxPhi
+            phi = phi.coerceIn(-maxPhi, maxPhi)
+            val projected = half * sin(phi) / curveK
+            val shift = (projected - sDist) * shiftK
+            meshVerts[v * 2] = px + nx * shift
+            meshVerts[v * 2 + 1] = py + ny * shift
+            val fade = if (outside) 0f else 1f - shiftK * (1f - (0.3f + 0.7f * cos(phi)))
+            meshColors[v] = Color.argb((fade * 255f).toInt().coerceIn(0, 255), 255, 255, 255)
+        }
+        canvas.drawBitmapMesh(bmp, m, m, meshVerts, 0, meshColors, 0, paint)
+    }
+
+    /**
+     * Körperform für das Zeichnen: erkannte Arm-/Beinachse, sonst eine Annahme aus dem Tattoo selbst
+     * (Achse entlang der Tattoo-Höhe, Breite etwas größer als das Tattoo).
+     */
+    private fun shapeFrame(): FloatArray? {
+        limb?.let { return it }
+        if (!anchored) return null
+        val topX = (quad[0] + quad[2]) / 2f
+        val topY = (quad[1] + quad[3]) / 2f
+        val botX = (quad[4] + quad[6]) / 2f
+        val botY = (quad[5] + quad[7]) / 2f
+        val leftX = (quad[0] + quad[6]) / 2f
+        val leftY = (quad[1] + quad[7]) / 2f
+        val rightX = (quad[2] + quad[4]) / 2f
+        val rightY = (quad[3] + quad[5]) / 2f
+        val dl = hypot(botX - topX, botY - topY)
+        val wl = hypot(rightX - leftX, rightY - leftY)
+        if (dl < 1f || wl < 1f) return null
+        val dx = (botX - topX) / dl
+        val dy = (botY - topY) / dl
+        val nx = (rightX - leftX) / wl
+        val ny = (rightY - leftY) / wl
+        return floatArrayOf((leftX + rightX) / 2f, (leftY + rightY) / 2f, dx, dy, nx, ny, wl * 0.8f)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -273,6 +373,17 @@ class ArOverlayView @JvmOverloads constructor(
             drawTattoo(canvas, multiply = false)
         }
         if (showPoints && frame == null) {
+            limb?.let { l ->
+                val len = max(width, height).toFloat()
+                for (side in -1..1) {
+                    val ox = l[0] + l[4] * l[6] * side
+                    val oy = l[1] + l[5] * l[6] * side
+                    canvas.drawLine(
+                        ox - l[2] * len, oy - l[3] * len, ox + l[2] * len, oy + l[3] * len,
+                        if (side == 0) axisPaint else edgePaint
+                    )
+                }
+            }
             trackedPoints?.let { p ->
                 var i = 0
                 while (i + 1 < p.size) {
@@ -409,7 +520,6 @@ class ArOverlayView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
-        warpExecutor.shutdown()
     }
 
     companion object {
@@ -438,44 +548,6 @@ class ArOverlayView @JvmOverloads constructor(
             return true
         }
 
-        /**
-         * Legt das Tattoo um einen Zylinder (Arm/Bein): zur Seite hin gestaucht und ausgeblendet.
-         * curvature 0 = flach, 1 = stark gewölbt.
-         */
-        fun warpCylinder(src: Bitmap, curvature: Float): Bitmap {
-            if (curvature < 0.02f) return src
-            val w = src.width
-            val h = src.height
-            val inPx = IntArray(w * h)
-            src.getPixels(inPx, 0, w, 0, 0, w, h)
-            val outPx = IntArray(w * h)
-            val phiMax = curvature * 1.35f
-            val sinMax = sin(phiMax)
-            for (xo in 0 until w) {
-                val u = (xo + 0.5f) / w * 2f - 1f
-                val phi = asin((u * sinMax).coerceIn(-1f, 1f))
-                val us = phi / phiMax
-                val xs = ((us + 1f) / 2f * w - 0.5f).coerceIn(0f, (w - 1).toFloat())
-                val x0 = floor(xs).toInt()
-                val x1 = min(w - 1, x0 + 1)
-                val f = xs - x0
-                // Zum Rand hin blasser (Haut dreht sich vom Betrachter weg)
-                val shade = (1f - curvature) + curvature * (0.35f + 0.65f * cos(phi))
-                for (y in 0 until h) {
-                    val c0 = inPx[y * w + x0]
-                    val c1 = inPx[y * w + x1]
-                    val a0 = (c0 ushr 24) * (1f - f)
-                    val a1 = (c1 ushr 24) * f
-                    val a = a0 + a1
-                    if (a < 0.5f) continue
-                    val r = (((c0 shr 16) and 0xFF) * a0 + ((c1 shr 16) and 0xFF) * a1) / a
-                    val g = (((c0 shr 8) and 0xFF) * a0 + ((c1 shr 8) and 0xFF) * a1) / a
-                    val b = ((c0 and 0xFF) * a0 + (c1 and 0xFF) * a1) / a
-                    val alpha = (a * shade).toInt().coerceIn(0, 255)
-                    outPx[y * w + xo] = (alpha shl 24) or (r.toInt() shl 16) or (g.toInt() shl 8) or b.toInt()
-                }
-            }
-            return Bitmap.createBitmap(outPx, w, h, Bitmap.Config.ARGB_8888)
-        }
+        private const val MESH = 22
     }
 }
