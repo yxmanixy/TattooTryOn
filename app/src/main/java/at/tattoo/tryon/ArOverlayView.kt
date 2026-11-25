@@ -184,15 +184,34 @@ class ArOverlayView @JvmOverloads constructor(
         return floatArrayOf(x / 4f, y / 4f)
     }
 
-    /** Wendet die vom Tracker gemessene Bewegung an (UI-Thread). */
-    fun applyMotion(m: Matrix) {
+    // Referenzlage (Moment des Verankerns) und letzte Abbildung Referenz -> jetzt
+    private val refQuad = FloatArray(8)
+    private val lastT = Matrix()
+
+    @Volatile
+    private var refSnapshot: FloatArray? = null
+
+    /** Für den Tracker (Analyse-Thread). */
+    fun referenceQuadForTracking(): FloatArray? = refSnapshot
+
+    /** Aktuelle Lage wird zur neuen Ausgangslage (beim Verankern / nach dem Standbild). */
+    fun resetReference() {
+        System.arraycopy(quad, 0, refQuad, 0, 8)
+        lastT.reset()
+        refSnapshot = refQuad.copyOf()
+    }
+
+    /**
+     * Setzt das Tattoo auf: Referenz-Viereck abgebildet mit der aktuellen Transformation.
+     * Weil immer von der Referenz aus gerechnet wird, sammeln sich keine Verzerrungen an.
+     */
+    fun applyTransform(t: Matrix) {
         if (!anchored || frozenFrame != null || !quadValid) return
-        val next = quad.copyOf()
-        m.mapPoints(next)
-        // Plausibilitätsprüfung: Fläche und Lage
-        val oldArea = area(quad)
-        val newArea = area(next)
-        if (newArea < oldArea * 0.5f || newArea > oldArea * 2f || !convex(next)) return
+        val next = refQuad.copyOf()
+        t.mapPoints(next)
+        val a0 = area(refQuad)
+        val a1 = area(next)
+        if (!convex(next) || a1 < a0 * 0.15f || a1 > a0 * 6f) return
         var cx = 0f
         var cy = 0f
         for (i in 0 until 4) {
@@ -200,7 +219,9 @@ class ArOverlayView @JvmOverloads constructor(
         }
         cx /= 4f; cy /= 4f
         if (cx < -width || cx > 2f * width || cy < -height || cy > 2f * height) return
-        System.arraycopy(next, 0, quad, 0, 8)
+        // Leichte Glättung gegen Zittern
+        for (i in 0 until 8) quad[i] += (next[i] - quad[i]) * 0.75f
+        lastT.set(t)
         publish()
         invalidate()
     }
@@ -350,6 +371,7 @@ class ArOverlayView @JvmOverloads constructor(
                     m.mapPoints(quad)
                     publish()
                     anchored = true
+                    resetReference()
                     invalidate()
                     listener?.onAnchored()
                 } else if (edited && anchored) {
@@ -367,6 +389,16 @@ class ArOverlayView @JvmOverloads constructor(
 
     private fun transformQuad(m: Matrix) {
         m.mapPoints(quad)
+        if (anchored) {
+            // Änderung in die Referenzlage zurückrechnen, damit sie beim Tracking erhalten bleibt
+            val inv = Matrix()
+            if (lastT.invert(inv)) {
+                val r = quad.copyOf()
+                inv.mapPoints(r)
+                System.arraycopy(r, 0, refQuad, 0, 8)
+                refSnapshot = refQuad.copyOf()
+            }
+        }
         publish()
         edited = true
         invalidate()

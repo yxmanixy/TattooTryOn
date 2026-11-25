@@ -43,6 +43,7 @@ class ArActivity : AppCompatActivity(), ArOverlayView.Listener, TattooTracker.Li
     private var tattooPath: String? = null
     private var trackingAvailable = false
     private var stable = false
+    private var trackGen = -1
 
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -193,8 +194,18 @@ class ArActivity : AppCompatActivity(), ArOverlayView.Listener, TattooTracker.Li
     private fun unfreeze() {
         overlay.unfreeze()
         btnFreeze.text = "⏸ Standbild"
-        if (overlay.anchored) tracker?.active = true
+        if (overlay.anchored) {
+            // Das aktuelle Bild wird zur neuen Ausgangslage
+            overlay.resetReference()
+            startTracking()
+        }
         updateStatus()
+    }
+
+    private fun startTracking() {
+        val t = tracker ?: return
+        t.active = true
+        trackGen = t.restart()
     }
 
     private fun saveJpg() {
@@ -241,11 +252,7 @@ class ArActivity : AppCompatActivity(), ArOverlayView.Listener, TattooTracker.Li
     // ---------- ArOverlayView.Listener ----------
 
     override fun onAnchored() {
-        val t = tracker
-        if (t != null) {
-            t.active = true
-            t.restart()
-        }
+        startTracking()
         stable = false
         updateStatus()
     }
@@ -256,9 +263,13 @@ class ArActivity : AppCompatActivity(), ArOverlayView.Listener, TattooTracker.Li
 
     // ---------- TattooTracker.Listener (Analyse-Thread) ----------
 
-    override fun onMotion(motion: Matrix) {
-        runOnUiThread { overlay.applyMotion(motion) }
+    override fun onTransform(refToCurrent: Matrix, generation: Int) {
+        runOnUiThread {
+            if (generation == trackGen) overlay.applyTransform(refToCurrent)
+        }
     }
+
+    override fun referenceQuad(): FloatArray? = overlay.referenceQuadForTracking()
 
     override fun onTrackingState(stable: Boolean) {
         runOnUiThread {
